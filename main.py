@@ -73,7 +73,6 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
     async def on_submit(self, interaction: discord.Interaction):
         global ticket_counter
 
-        # Проверки (можно убрать, но оставим для безопасности)
         steam = self.steamid.value.strip()
         if not steam.isdigit():
             await interaction.response.send_message("❌ SteamID должен содержать только цифры.", ephemeral=True)
@@ -86,13 +85,11 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
             await interaction.response.send_message("❌ Категория или роль не найдены.", ephemeral=True)
             return
 
-        # Проверка на существующий тикет
         existing = discord.utils.get(category.channels, topic=str(interaction.user.id))
         if existing:
             await interaction.response.send_message(f"⚠️ У вас уже есть тикет: {existing.mention}", ephemeral=True)
             return
 
-        # Получаем номер
         async with counter_lock:
             current_number = ticket_counter
             ticket_counter += 1
@@ -116,7 +113,6 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
             await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
             return
 
-        # Отправляем данные в канал
         embed = discord.Embed(title="Информация о тикете", color=discord.Color.blue())
         embed.add_field(name="Категория", value=self.category_name, inline=False)
         embed.add_field(name="SteamID64", value=steam, inline=False)
@@ -125,13 +121,11 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         embed.set_footer(text=f"От: {interaction.user.display_name}")
         await channel.send(embed=embed)
 
-        # Кнопка закрытия
         close_btn = CloseTicketButton()
         view = discord.ui.View()
         view.add_item(close_btn)
         await channel.send("🔒 Для закрытия нажмите кнопку.", view=view)
 
-        # Уведомление в лог-канал
         log_channel = bot.log_channel
         if log_channel:
             log_embed = discord.Embed(title="🆕 Новый тикет", color=discord.Color.gold())
@@ -170,7 +164,6 @@ class CloseTicketButton(discord.ui.Button):
 
         await interaction.response.send_message("⏳ Тикет закрывается...", ephemeral=True)
 
-        # Логируем закрытие в лог-канал (опционально)
         log_channel = bot.log_channel
         if log_channel:
             log_embed = discord.Embed(title="🔒 Тикет закрыт", color=discord.Color.red())
@@ -180,7 +173,7 @@ class CloseTicketButton(discord.ui.Button):
 
         await channel.delete()
 
-# ---------- Кнопки категорий ----------
+# ---------- Кнопки категорий (с изменёнными названиями) ----------
 class TicketCategoryButton(discord.ui.Button):
     def __init__(self, label: str, category_name: str):
         super().__init__(label=label, style=discord.ButtonStyle.primary, custom_id=f"ticket_{category_name}")
@@ -190,20 +183,20 @@ class TicketCategoryButton(discord.ui.Button):
         modal = TicketModal(category_name=self.category_name)
         await interaction.response.send_modal(modal)
 
-# ---------- Представление с кнопками ----------
+# ---------- Представление с кнопками (обновлённый список) ----------
 class TicketSetupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        # Список категорий (можно менять)
+        # Новые названия с эмодзи (как в ваших последних правках)
         categories = [
-            "Общие вопросы",
-            "Восстановление вещей",
-            "Технические проблемы",
-            "Жалоба на игрока",
-            "Жалоба на Администрацию"
+            ("❔ Общие вопросы", "Общие вопросы"),
+            ("📦 Восстановление имущества", "Восстановление имущества"),
+            ("🛠️ Технические проблемы", "Технические проблемы"),
+            ("⚠️ Жалоба на игрока / группировку", "Жалоба на игрока / группировку"),
+            ("🛡️ Жалоба на Администрацию", "Жалоба на Администрацию")
         ]
-        for cat in categories:
-            self.add_item(TicketCategoryButton(label=cat, category_name=cat))
+        for label, cat_name in categories:
+            self.add_item(TicketCategoryButton(label=label, category_name=cat_name))
 
 # ---------- Команда /ticket_setup ----------
 @bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками")
@@ -217,10 +210,9 @@ async def ticket_setup(interaction: discord.Interaction):
     view = TicketSetupView()
     await interaction.response.send_message(embed=embed, view=view)
 
-# ---------- Команда /close (альтернатива) ----------
+# ---------- Команда /close ----------
 @bot.tree.command(name="close", description="Закрыть текущий тикет")
 async def close_ticket(interaction: discord.Interaction):
-    # Используем ту же логику, что и кнопка
     channel = interaction.channel
     if not channel.category or channel.category.id != TICKET_CATEGORY_ID:
         await interaction.response.send_message("❌ Это не канал тикета.", ephemeral=True)
