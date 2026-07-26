@@ -107,91 +107,99 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
         self.category_name = category_name
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Мгновенно отвечаем Discord
+        await interaction.response.defer(ephemeral=True)
+        # Запускаем фоновую задачу
+        asyncio.create_task(self._handle_submit(interaction))
+
+    async def _handle_submit(self, interaction: discord.Interaction):
+        """Фоновая обработка создания тикета."""
         global ticket_counter
 
-        # --- МГНОВЕННЫЙ ОТВЕТ ДИСКОРДУ (даём себе 15 минут) ---
-        await interaction.response.defer(ephemeral=True)
-
-        steam = self.steamid.value.strip()
-        if not steam.isdigit():
-            await interaction.followup.send("❌ SteamID64 должен содержать только цифры.", ephemeral=True)
-            return
-        if len(steam) > 20:
-            await interaction.followup.send("❌ SteamID64 слишком длинный (максимум 20 цифр).", ephemeral=True)
-            return
-
-        guild = interaction.guild
-        category = bot.category
-        support_role = bot.support_role
-        if not category or not support_role:
-            await interaction.followup.send("❌ Сервер не настроен правильно (категория или роль не найдены).", ephemeral=True)
-            return
-
-        existing = discord.utils.get(category.channels, topic=str(interaction.user.id))
-        if existing:
-            await interaction.followup.send(f"⚠️ У вас уже есть открытый тикет: {existing.mention}", ephemeral=True)
-            return
-
-        async with counter_lock:
-            current_number = ticket_counter
-            ticket_counter += 1
-            save_counter()
-
-        channel_name = f"ticket-{current_number:05d}"
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            support_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        }
-
         try:
-            channel = await guild.create_text_channel(
-                name=channel_name,
-                category=category,
-                overwrites=overwrites,
-                topic=str(interaction.user.id)
-            )
-        except Exception as e:
-            await interaction.followup.send(f"❌ Ошибка создания канала: {e}", ephemeral=True)
+            steam = self.steamid.value.strip()
+            if not steam.isdigit():
+                await interaction.followup.send("❌ SteamID64 должен содержать только цифры.", ephemeral=True)
+                return
+            if len(steam) > 20:
+                await interaction.followup.send("❌ SteamID64 слишком длинный (максимум 20 цифр).", ephemeral=True)
+                return
+
+            guild = interaction.guild
+            category = bot.category
+            support_role = bot.support_role
+            if not category or not support_role:
+                await interaction.followup.send("❌ Сервер не настроен правильно (категория или роль не найдены).", ephemeral=True)
+                return
+
+            existing = discord.utils.get(category.channels, topic=str(interaction.user.id))
+            if existing:
+                await interaction.followup.send(f"⚠️ У вас уже есть открытый тикет: {existing.mention}", ephemeral=True)
+                return
+
             async with counter_lock:
-                ticket_counter = current_number
+                current_number = ticket_counter
+                ticket_counter += 1
                 save_counter()
-            return
 
-        await write_ticket_log(current_number, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Тикет создан пользователем {interaction.user} (ID: {interaction.user.id})")
-        await write_ticket_log(current_number, f"Категория: {self.category_name}")
-        await write_ticket_log(current_number, f"SteamID64: {steam}")
-        await write_ticket_log(current_number, f"Ник: {self.nickname.value}")
-        await write_ticket_log(current_number, f"Проблема: {self.brief.value}")
+            channel_name = f"ticket-{current_number:05d}"
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                support_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            }
 
-        embed = discord.Embed(title="📋 Информация о тикете", color=discord.Color.blue())
-        embed.add_field(name="Категория", value=self.category_name, inline=False)
-        embed.add_field(name="SteamID64", value=steam, inline=False)
-        embed.add_field(name="Ник в игре", value=self.nickname.value, inline=False)
-        embed.add_field(name="Кратко о проблеме", value=self.brief.value, inline=False)
-        embed.set_footer(text=f"От: {interaction.user.display_name}")
-        await channel.send(embed=embed)
+            try:
+                channel = await guild.create_text_channel(
+                    name=channel_name,
+                    category=category,
+                    overwrites=overwrites,
+                    topic=str(interaction.user.id)
+                )
+            except Exception as e:
+                await interaction.followup.send(f"❌ Ошибка создания канала: {e}", ephemeral=True)
+                async with counter_lock:
+                    ticket_counter = current_number
+                    save_counter()
+                return
 
-        view = discord.ui.View()
-        view.add_item(CloseTicketButton())
-        view.add_item(VerifyTicketButton())
-        await channel.send("🔒 Для закрытия тикета нажмите кнопку ниже.", view=view)
+            # Логи
+            await write_ticket_log(current_number, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Тикет создан пользователем {interaction.user} (ID: {interaction.user.id})")
+            await write_ticket_log(current_number, f"Категория: {self.category_name}")
+            await write_ticket_log(current_number, f"SteamID64: {steam}")
+            await write_ticket_log(current_number, f"Ник: {self.nickname.value}")
+            await write_ticket_log(current_number, f"Проблема: {self.brief.value}")
 
-        log_channel = bot.log_channel
-        if log_channel:
-            log_embed = discord.Embed(title="🆕 Новый тикет", color=discord.Color.gold())
-            log_embed.add_field(name="Номер", value=f"#{current_number:05d}", inline=False)
-            log_embed.add_field(name="Пользователь", value=interaction.user.mention, inline=False)
-            log_embed.add_field(name="Канал", value=channel.mention, inline=False)
-            log_embed.add_field(name="Категория", value=self.category_name, inline=False)
-            await log_channel.send(embed=log_embed)
+            # Embed в канал
+            embed = discord.Embed(title="📋 Информация о тикете", color=discord.Color.blue())
+            embed.add_field(name="Категория", value=self.category_name, inline=False)
+            embed.add_field(name="SteamID64", value=steam, inline=False)
+            embed.add_field(name="Ник в игре", value=self.nickname.value, inline=False)
+            embed.add_field(name="Кратко о проблеме", value=self.brief.value, inline=False)
+            embed.set_footer(text=f"От: {interaction.user.display_name}")
+            await channel.send(embed=embed)
 
-        await interaction.followup.send(f"✅ Тикет создан! Перейдите в {channel.mention}", ephemeral=True)
+            # Кнопки
+            view = discord.ui.View()
+            view.add_item(CloseTicketButton())
+            view.add_item(VerifyTicketButton())
+            await channel.send("🔒 Для закрытия тикета нажмите кнопку ниже.", view=view)
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception):
-        await interaction.followup.send("❌ Произошла ошибка при отправке формы.", ephemeral=True)
-        print(f"Ошибка в модальном окне: {error}")
+            # Лог-канал
+            log_channel = bot.log_channel
+            if log_channel:
+                log_embed = discord.Embed(title="🆕 Новый тикет", color=discord.Color.gold())
+                log_embed.add_field(name="Номер", value=f"#{current_number:05d}", inline=False)
+                log_embed.add_field(name="Пользователь", value=interaction.user.mention, inline=False)
+                log_embed.add_field(name="Канал", value=channel.mention, inline=False)
+                log_embed.add_field(name="Категория", value=self.category_name, inline=False)
+                await log_channel.send(embed=log_embed)
+
+            await interaction.followup.send(f"✅ Тикет создан! Перейдите в {channel.mention}", ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send("❌ Произошла внутренняя ошибка.", ephemeral=True)
+            print(f"Ошибка в _handle_submit: {e}")
 
 # ---------- Кнопка категории ----------
 class TicketCategoryButton(discord.ui.Button):
