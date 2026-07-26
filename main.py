@@ -4,14 +4,14 @@ from discord.ext import commands
 import os
 import sys
 import asyncio
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 from aiohttp import web
-import concurrent.futures
 
 load_dotenv()
 
-# ---------- КОНФИГУРАЦИЯ ----------
+# ---------- Конфигурация ----------
 TOKEN = os.getenv('DISCORD_TOKEN')
 TICKET_CATEGORY_ID = int(os.getenv('TICKET_CATEGORY_ID', 0))
 SUPPORT_ROLE_ID = int(os.getenv('SUPPORT_ROLE_ID', 0))
@@ -19,10 +19,9 @@ LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
 
 if not all([TOKEN, TICKET_CATEGORY_ID, SUPPORT_ROLE_ID, LOG_CHANNEL_ID]):
     print("❌ Ошибка: не заданы все переменные окружения.")
-    print("Необходимы: DISCORD_TOKEN, TICKET_CATEGORY_ID, SUPPORT_ROLE_ID, LOG_CHANNEL_ID")
     sys.exit(1)
 
-# ---------- СЧЁТЧИК ----------
+# ---------- Счётчик ----------
 COUNTER_FILE = "data/ticket_counter.txt"
 ticket_counter = 1
 counter_lock = asyncio.Lock()
@@ -40,21 +39,14 @@ def save_counter():
     with open(COUNTER_FILE, "w") as f:
         f.write(str(ticket_counter))
 
-# ---------- ЛОГИРОВАНИЕ (прямая запись, но асинхронно) ----------
+# ---------- Логи (простые) ----------
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 async def write_ticket_log(ticket_number: int, text: str):
-    """Асинхронно дописывает строку в лог-файл (без буферизации)"""
     path = os.path.join(LOG_DIR, f"ticket-{ticket_number:05d}.log")
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}\n"
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(executor, append_file, path, line)
-
-def append_file(path: str, line: str):
     with open(path, "a", encoding="utf-8") as f:
-        f.write(line)
+        f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
 
 async def read_ticket_log(ticket_number: int) -> str:
     path = os.path.join(LOG_DIR, f"ticket-{ticket_number:05d}.log")
@@ -68,19 +60,17 @@ async def delete_ticket_log(ticket_number: int):
     if os.path.exists(path):
         os.remove(path)
 
-# ---------- БОТ ----------
+# ---------- Бот ----------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Кэш объектов
 bot.category = None
 bot.support_role = None
 bot.log_channel = None
 bot.active_tickets = {}
 
-# ---------- КАТЕГОРИИ ----------
 CATEGORIES = [
     ("Общие вопросы", "general", "❓", discord.ButtonStyle.primary),
     ("Восстановление вещей", "restore", "📦", discord.ButtonStyle.success),
@@ -89,7 +79,7 @@ CATEGORIES = [
     ("Жалоба на Администрацию", "admin_report", "🚨", discord.ButtonStyle.danger)
 ]
 
-# ---------- МОДАЛЬНОЕ ОКНО (с диагностикой) ----------
+# ---------- Модальное окно (с замером времени) ----------
 class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
     steamid = discord.ui.TextInput(
         label='SteamID64',
@@ -113,14 +103,21 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
         self.category_name = category_name
 
     async def on_submit(self, interaction: discord.Interaction):
-        print(f"🔹 [Модальное окно] Получен submit от {interaction.user}")
-        await interaction.response.defer(ephemeral=True)
-        print(f"🔹 [Модальное окно] Defer отправлен")
-        asyncio.create_task(self._handle(interaction))
+        start_time = time.time()
+        print(f"🔹 [ВХОД] on_submit в {start_time:.3f}")
 
-    async def _handle(self, interaction: discord.Interaction):
+        # --- Отправляем defer мгновенно ---
+        await interaction.response.defer(ephemeral=True)
+        defer_time = time.time()
+        print(f"🔹 [DEFER] Отправлен за {defer_time - start_time:.3f} сек")
+
+        # Запускаем фоновую обработку
+        asyncio.create_task(self._handle(interaction, start_time))
+
+    async def _handle(self, interaction: discord.Interaction, start_time: float):
         try:
-            print(f"🔸 [Обработка] Начало фоновой задачи")
+            print(f"🔸 [ОБРАБОТКА] Начало фоновой задачи через {time.time() - start_time:.3f} сек")
+
             steam = self.steamid.value.strip()
             if not steam.isdigit():
                 await interaction.followup.send("❌ SteamID64 – только цифры.", ephemeral=True)
@@ -136,14 +133,12 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
                 await interaction.followup.send("❌ Ошибка конфигурации сервера.", ephemeral=True)
                 return
 
-            # Проверка существующего тикета
             if interaction.user.id in bot.active_tickets:
                 ch = bot.active_tickets[interaction.user.id]
                 if ch and ch.guild == guild:
                     await interaction.followup.send(f"⚠️ У вас уже есть тикет: {ch.mention}", ephemeral=True)
                     return
 
-            # Получаем номер
             async with counter_lock:
                 current_number = ticket_counter
                 ticket_counter += 1
@@ -156,30 +151,24 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
                 support_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
             }
 
-            print(f"🔸 [Обработка] Создаю канал {channel_name}...")
-            try:
-                channel = await guild.create_text_channel(
-                    name=channel_name,
-                    category=category,
-                    overwrites=overwrites,
-                    topic=str(interaction.user.id)
-                )
-            except Exception as e:
-                print(f"❌ Ошибка создания канала: {e}")
-                await interaction.followup.send(f"❌ Ошибка создания канала: {e}", ephemeral=True)
-                return
+            print(f"🔸 [СОЗДАНИЕ] Канал {channel_name}...")
+            create_start = time.time()
+            channel = await guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+                topic=str(interaction.user.id)
+            )
+            print(f"✅ Канал создан за {time.time() - create_start:.3f} сек")
 
-            print(f"✅ Канал {channel.name} создан")
             bot.active_tickets[interaction.user.id] = channel
 
-            # Логируем (асинхронно)
             await write_ticket_log(current_number, f"Тикет создан {interaction.user} (ID:{interaction.user.id})")
             await write_ticket_log(current_number, f"Категория: {self.category_name}")
             await write_ticket_log(current_number, f"SteamID64: {steam}")
             await write_ticket_log(current_number, f"Ник: {self.nickname.value}")
             await write_ticket_log(current_number, f"Проблема: {self.brief.value}")
 
-            # Отправляем embed в канал
             embed = discord.Embed(title="📋 Информация", color=discord.Color.blue())
             embed.add_field(name="Категория", value=self.category_name, inline=False)
             embed.add_field(name="SteamID64", value=steam, inline=False)
@@ -188,37 +177,34 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
             embed.set_footer(text=f"От: {interaction.user.display_name}")
             await channel.send(embed=embed)
 
-            # Кнопки управления
             view = discord.ui.View()
             view.add_item(CloseTicketButton())
             view.add_item(VerifyTicketButton())
             await channel.send("🔒 Кнопки управления:", view=view)
 
-            # Уведомление в лог-канал
             log_channel = bot.log_channel
             if log_channel:
                 try:
                     await log_channel.send(f"🆕 Тикет #{current_number:05d} от {interaction.user.mention} → {channel.mention}")
-                except Exception as e:
-                    print(f"⚠️ Не удалось отправить уведомление в лог-канал: {e}")
+                except:
+                    pass
 
             await interaction.followup.send(f"✅ Тикет создан! {channel.mention}", ephemeral=True)
-            print(f"✅ Тикет #{current_number} успешно обработан")
+            print(f"✅ Тикет #{current_number} завершён за {time.time() - start_time:.3f} сек")
 
         except Exception as e:
-            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА в _handle: {e}")
+            print(f"❌ Ошибка: {e}")
             try:
-                await interaction.followup.send("❌ Внутренняя ошибка. Попробуйте позже.", ephemeral=True)
+                await interaction.followup.send("❌ Внутренняя ошибка.", ephemeral=True)
             except:
                 pass
 
-# ---------- КНОПКИ (упрощены) ----------
+# ---------- Кнопки (упрощённо) ----------
 class TicketCategoryButton(discord.ui.Button):
     def __init__(self, label: str, category_name: str, emoji: str, style: discord.ButtonStyle):
         super().__init__(label=label, style=style, custom_id=f"ticket_{category_name}", emoji=emoji)
         self.category_name = category_name
     async def callback(self, interaction: discord.Interaction):
-        print(f"🟢 Нажата кнопка {self.label} от {interaction.user}")
         modal = TicketModal(category_name=self.category_name)
         await interaction.response.send_modal(modal)
 
@@ -282,7 +268,7 @@ class VerifyTicketButton(discord.ui.Button):
         close_btn = CloseTicketButton()
         await close_btn._close(interaction, True)
 
-# ---------- ПРЕДСТАВЛЕНИЕ (кэшируется) ----------
+# ---------- Представление ----------
 class TicketSetupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -290,7 +276,6 @@ class TicketSetupView(discord.ui.View):
             self.add_item(TicketCategoryButton(label=label, category_name=label, emoji=emoji, style=style))
 ticket_setup_view = TicketSetupView()
 
-# ---------- КОМАНДЫ ----------
 @bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками")
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
@@ -313,27 +298,13 @@ async def close_ticket(interaction: discord.Interaction):
     close_btn = CloseTicketButton()
     await close_btn._close(interaction, False)
 
-# ---------- ТЕСТОВАЯ КОМАНДА (для проверки создания канала) ----------
-@bot.tree.command(name="test_channel", description="[Тест] Создать канал без модального окна")
-@app_commands.default_permissions(administrator=True)
-async def test_channel(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        guild = interaction.guild
-        category = bot.category
-        if not category:
-            await interaction.followup.send("❌ Категория не найдена.", ephemeral=True)
-            return
-        channel = await guild.create_text_channel(
-            name="test-channel-from-bot",
-            category=category
-        )
-        await interaction.followup.send(f"✅ Канал создан: {channel.mention}", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
-        print(f"Ошибка в test_channel: {e}")
+# ---------- Тестовая команда для проверки задержки ----------
+@bot.tree.command(name="ping_latency", description="Проверить задержку до Discord")
+async def ping_latency(interaction: discord.Interaction):
+    start = time.time()
+    await interaction.response.send_message(f"🏓 Пинг: {round((time.time() - start) * 1000)} мс", ephemeral=True)
 
-# ---------- ОБРАБОТЧИК СООБЩЕНИЙ (логирование) ----------
+# ---------- Обработчик сообщений ----------
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -353,7 +324,7 @@ async def on_message(message):
     await write_ticket_log(ticket_number, f"{message.author} (ID:{message.author.id}): {message.content}")
     await bot.process_commands(message)
 
-# ---------- ВЕБ-СЕРВЕР ----------
+# ---------- Веб-сервер ----------
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
@@ -367,7 +338,6 @@ async def start_web():
     print("🌐 Health check на порту 8080")
     await asyncio.Event().wait()
 
-# ---------- ЗАПУСК ----------
 @bot.event
 async def on_ready():
     load_counter()
