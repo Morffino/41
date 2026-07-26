@@ -7,6 +7,9 @@ import asyncio
 from dotenv import load_dotenv
 from aiohttp import web
 
+# Импорт нашего логгера
+from logger import log_open, log_message, log_close, get_log_content, delete_log
+
 load_dotenv()
 
 # ---------- Конфигурация ----------
@@ -113,6 +116,16 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
             await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
             return
 
+        # --- Логируем открытие ---
+        await log_open(
+            current_number,
+            str(interaction.user),
+            self.category_name,
+            steam,
+            self.nickname.value,
+            self.brief.value
+        )
+
         embed = discord.Embed(title="Информация о тикете", color=discord.Color.blue())
         embed.add_field(name="Категория", value=self.category_name, inline=False)
         embed.add_field(name="SteamID64", value=steam, inline=False)
@@ -147,6 +160,9 @@ class CloseTicketButton(discord.ui.Button):
         super().__init__(label="Закрыть тикет", style=discord.ButtonStyle.danger, custom_id="close_ticket")
 
     async def callback(self, interaction: discord.Interaction):
+        await self._close(interaction, verified=False)
+
+    async def _close(self, interaction: discord.Interaction, verified: bool):
         channel = interaction.channel
         if not channel.category or channel.category.id != TICKET_CATEGORY_ID:
             await interaction.response.send_message("❌ Это не канал тикета.", ephemeral=True)
@@ -162,18 +178,44 @@ class CloseTicketButton(discord.ui.Button):
             await interaction.response.send_message("⛔ У вас нет прав.", ephemeral=True)
             return
 
+        # Получаем номер тикета
+        try:
+            ticket_number = int(channel.name.split('-')[1])
+        except:
+            ticket_number = None
+
         await interaction.response.send_message("⏳ Тикет закрывается...", ephemeral=True)
 
-        log_channel = bot.log_channel
-        if log_channel:
-            log_embed = discord.Embed(title="🔒 Тикет закрыт", color=discord.Color.red())
-            log_embed.add_field(name="Канал", value=channel.name, inline=False)
-            log_embed.add_field(name="Закрыл", value=interaction.user.mention, inline=False)
-            await log_channel.send(embed=log_embed)
+        # --- Логируем закрытие ---
+        if ticket_number:
+            status = "ПРОВЕРЕН" if verified else "ЗАКРЫТ"
+            await log_close(ticket_number, str(interaction.user), verified)
 
+            # Отправляем лог-файл в лог-канал
+            log_channel = bot.log_channel
+            if log_channel:
+                log_content = await get_log_content(ticket_number)
+                if log_content.strip():
+                    temp_path = f"/tmp/ticket_{ticket_number:05d}.log"
+                    with open(temp_path, "w", encoding="utf-8") as f:
+                        f.write(log_content)
+                    try:
+                        await log_channel.send(
+                            f"📄 Лог тикета #{ticket_number:05d} ({status})",
+                            file=discord.File(temp_path, filename=f"ticket_{ticket_number:05d}.log")
+                        )
+                    except:
+                        pass
+                    os.remove(temp_path)
+                else:
+                    await log_channel.send(f"📄 Лог тикета #{ticket_number:05d} пуст.")
+            # Удаляем локальный лог-файл
+            await delete_log(ticket_number)
+
+        # Удаляем канал
         await channel.delete()
 
-# ---------- Кнопки категорий (с разными цветами) ----------
+# ---------- Кнопки категорий ----------
 class TicketCategoryButton(discord.ui.Button):
     def __init__(self, label: str, category_name: str, style: discord.ButtonStyle):
         super().__init__(label=label, style=style, custom_id=f"ticket_{category_name}")
@@ -183,11 +225,10 @@ class TicketCategoryButton(discord.ui.Button):
         modal = TicketModal(category_name=self.category_name)
         await interaction.response.send_modal(modal)
 
-# ---------- Представление с настраиваемыми кнопками ----------
+# ---------- Представление с кнопками ----------
 class TicketSetupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        # Формат: (текст на кнопке, внутреннее имя категории, стиль кнопки)
         categories = [
             ("❔ Общие вопросы", "Общие вопросы", discord.ButtonStyle.primary),
             ("📦 Восстановление имущества", "Восстановление имущества", discord.ButtonStyle.success),
@@ -198,7 +239,7 @@ class TicketSetupView(discord.ui.View):
         for label, cat_name, style in categories:
             self.add_item(TicketCategoryButton(label=label, category_name=cat_name, style=style))
 
-# ---------- Команда /ticket_setup (с обновлённым embed) ----------
+# ---------- Команды ----------
 @bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками")
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
@@ -220,29 +261,41 @@ async def ticket_setup(interaction: discord.Interaction):
     view = TicketSetupView()
     await interaction.response.send_message(embed=embed, view=view)
 
-# ---------- Команда /close ----------
 @bot.tree.command(name="close", description="Закрыть текущий тикет")
 async def close_ticket(interaction: discord.Interaction):
-    channel = interaction.channel
-    if not channel.category or channel.category.id != TICKET_CATEGORY_ID:
-        await interaction.response.send_message("❌ Это не канал тикета.", ephemeral=True)
+    close_btn = CloseTicketButton()
+    await close_btn._close(interaction, verified=False)
+
+# ---------- Обработчик сообщений для логирования ----------
+@bot.event
+async def on_message(message):
+    # Игнорируем сообщения от бота
+    if message.author.bot:
+        await bot.process_commands(message)
         return
-    creator_id = channel.topic
-    if creator_id is None:
-        await interaction.response.send_message("❌ Не удалось определить создателя.", ephemeral=True)
+
+    # Проверяем, что канал находится в категории тикетов
+    if not message.channel.category or message.channel.category.id != TICKET_CATEGORY_ID:
+        await bot.process_commands(message)
         return
-    creator_id = int(creator_id)
-    if interaction.user.id != creator_id and not interaction.user.get_role(SUPPORT_ROLE_ID):
-        await interaction.response.send_message("⛔ У вас нет прав.", ephemeral=True)
+
+    # Извлекаем номер тикета из имени канала
+    channel_name = message.channel.name
+    if not channel_name.startswith("ticket-"):
+        await bot.process_commands(message)
         return
-    await interaction.response.send_message("⏳ Тикет закрывается...", ephemeral=True)
-    log_channel = bot.log_channel
-    if log_channel:
-        log_embed = discord.Embed(title="🔒 Тикет закрыт", color=discord.Color.red())
-        log_embed.add_field(name="Канал", value=channel.name, inline=False)
-        log_embed.add_field(name="Закрыл", value=interaction.user.mention, inline=False)
-        await log_channel.send(embed=log_embed)
-    await channel.delete()
+
+    try:
+        ticket_number = int(channel_name.split('-')[1])
+    except:
+        await bot.process_commands(message)
+        return
+
+    # Записываем сообщение в лог (без лишних проверок)
+    await log_message(ticket_number, str(message.author), message.content)
+
+    # Обязательно передаём команды дальше
+    await bot.process_commands(message)
 
 # ---------- Веб-сервер ----------
 async def health_check(request):
