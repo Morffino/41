@@ -4,7 +4,6 @@ from discord.ext import commands
 import os
 import sys
 import asyncio
-import time
 from datetime import datetime
 from dotenv import load_dotenv
 from aiohttp import web
@@ -39,7 +38,7 @@ def save_counter():
     with open(COUNTER_FILE, "w") as f:
         f.write(str(ticket_counter))
 
-# ---------- Логи (простые) ----------
+# ---------- Логирование (минимальное) ----------
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -79,7 +78,7 @@ CATEGORIES = [
     ("Жалоба на Администрацию", "admin_report", "🚨", discord.ButtonStyle.danger)
 ]
 
-# ---------- Модальное окно (с замером времени) ----------
+# ---------- Модальное окно (без create_task) ----------
 class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
     steamid = discord.ui.TextInput(
         label='SteamID64',
@@ -103,21 +102,11 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
         self.category_name = category_name
 
     async def on_submit(self, interaction: discord.Interaction):
-        start_time = time.time()
-        print(f"🔹 [ВХОД] on_submit в {start_time:.3f}")
-
-        # --- Отправляем defer мгновенно ---
+        # 1. Мгновенный defer (снимает 3-секундный лимит)
         await interaction.response.defer(ephemeral=True)
-        defer_time = time.time()
-        print(f"🔹 [DEFER] Отправлен за {defer_time - start_time:.3f} сек")
 
-        # Запускаем фоновую обработку
-        asyncio.create_task(self._handle(interaction, start_time))
-
-    async def _handle(self, interaction: discord.Interaction, start_time: float):
+        # 2. ВСЯ ЛОГИКА ВЫПОЛНЯЕТСЯ СИНХРОННО (но асинхронно)
         try:
-            print(f"🔸 [ОБРАБОТКА] Начало фоновой задачи через {time.time() - start_time:.3f} сек")
-
             steam = self.steamid.value.strip()
             if not steam.isdigit():
                 await interaction.followup.send("❌ SteamID64 – только цифры.", ephemeral=True)
@@ -133,12 +122,14 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
                 await interaction.followup.send("❌ Ошибка конфигурации сервера.", ephemeral=True)
                 return
 
+            # Проверка существующего тикета
             if interaction.user.id in bot.active_tickets:
                 ch = bot.active_tickets[interaction.user.id]
                 if ch and ch.guild == guild:
                     await interaction.followup.send(f"⚠️ У вас уже есть тикет: {ch.mention}", ephemeral=True)
                     return
 
+            # Получаем номер
             async with counter_lock:
                 current_number = ticket_counter
                 ticket_counter += 1
@@ -151,24 +142,24 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
                 support_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
             }
 
-            print(f"🔸 [СОЗДАНИЕ] Канал {channel_name}...")
-            create_start = time.time()
+            # Создаём канал (без таймаута)
             channel = await guild.create_text_channel(
                 name=channel_name,
                 category=category,
                 overwrites=overwrites,
                 topic=str(interaction.user.id)
             )
-            print(f"✅ Канал создан за {time.time() - create_start:.3f} сек")
 
             bot.active_tickets[interaction.user.id] = channel
 
+            # Логируем
             await write_ticket_log(current_number, f"Тикет создан {interaction.user} (ID:{interaction.user.id})")
             await write_ticket_log(current_number, f"Категория: {self.category_name}")
             await write_ticket_log(current_number, f"SteamID64: {steam}")
             await write_ticket_log(current_number, f"Ник: {self.nickname.value}")
             await write_ticket_log(current_number, f"Проблема: {self.brief.value}")
 
+            # Отправляем embed
             embed = discord.Embed(title="📋 Информация", color=discord.Color.blue())
             embed.add_field(name="Категория", value=self.category_name, inline=False)
             embed.add_field(name="SteamID64", value=steam, inline=False)
@@ -177,11 +168,13 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
             embed.set_footer(text=f"От: {interaction.user.display_name}")
             await channel.send(embed=embed)
 
+            # Кнопки управления
             view = discord.ui.View()
             view.add_item(CloseTicketButton())
             view.add_item(VerifyTicketButton())
             await channel.send("🔒 Кнопки управления:", view=view)
 
+            # Уведомление в лог-канал
             log_channel = bot.log_channel
             if log_channel:
                 try:
@@ -189,8 +182,8 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
                 except:
                     pass
 
+            # Финальный ответ пользователю
             await interaction.followup.send(f"✅ Тикет создан! {channel.mention}", ephemeral=True)
-            print(f"✅ Тикет #{current_number} завершён за {time.time() - start_time:.3f} сек")
 
         except Exception as e:
             print(f"❌ Ошибка: {e}")
@@ -199,7 +192,7 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
             except:
                 pass
 
-# ---------- Кнопки (упрощённо) ----------
+# ---------- Кнопки ----------
 class TicketCategoryButton(discord.ui.Button):
     def __init__(self, label: str, category_name: str, emoji: str, style: discord.ButtonStyle):
         super().__init__(label=label, style=style, custom_id=f"ticket_{category_name}", emoji=emoji)
@@ -276,6 +269,7 @@ class TicketSetupView(discord.ui.View):
             self.add_item(TicketCategoryButton(label=label, category_name=label, emoji=emoji, style=style))
 ticket_setup_view = TicketSetupView()
 
+# ---------- Команды ----------
 @bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками")
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
@@ -297,12 +291,6 @@ async def ticket_setup(interaction: discord.Interaction):
 async def close_ticket(interaction: discord.Interaction):
     close_btn = CloseTicketButton()
     await close_btn._close(interaction, False)
-
-# ---------- Тестовая команда для проверки задержки ----------
-@bot.tree.command(name="ping_latency", description="Проверить задержку до Discord")
-async def ping_latency(interaction: discord.Interaction):
-    start = time.time()
-    await interaction.response.send_message(f"🏓 Пинг: {round((time.time() - start) * 1000)} мс", ephemeral=True)
 
 # ---------- Обработчик сообщений ----------
 @bot.event
