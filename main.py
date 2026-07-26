@@ -38,7 +38,7 @@ def save_counter():
     with open(COUNTER_FILE, "w") as f:
         f.write(str(ticket_counter))
 
-# ---------- Логирование (простое, прямо в main) ----------
+# ---------- Логирование (встроенное) ----------
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 log_lock = asyncio.Lock()
@@ -216,7 +216,7 @@ class CloseTicketButton(discord.ui.Button):
             await write_ticket_log(ticket_number, f"🔴 ТИКЕТ {status}")
             await write_ticket_log(ticket_number, f"   Закрыл: {interaction.user}")
 
-            # Отправляем ЛС создателю (если есть)
+            # Отправляем ЛС создателю
             try:
                 creator = await interaction.guild.fetch_member(creator_id)
                 if creator:
@@ -237,7 +237,7 @@ class CloseTicketButton(discord.ui.Button):
             except Exception as e:
                 print(f"⚠️ Не удалось отправить ЛС: {e}")
 
-            # Отправляем лог-файл в лог-канал
+            # Отправляем лог-файл в канал
             log_channel = bot.log_channel
             if log_channel:
                 log_content = await read_ticket_log(ticket_number)
