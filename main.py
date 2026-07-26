@@ -7,10 +7,6 @@ import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from aiohttp import web
-import resource
-
-# Увеличиваем лимит открытых файлов (для логов)
-resource.setrlimit(resource.RLIMIT_NOFILE, (65535, 65535))
 
 load_dotenv()
 
@@ -50,7 +46,6 @@ log_buffer = {}
 log_lock = asyncio.Lock()
 
 async def _flush_logs():
-    """Фоновый сброс буфера раз в 3 секунды (быстрее)"""
     while True:
         await asyncio.sleep(3)
         async with log_lock:
@@ -91,7 +86,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 bot.category = None
 bot.support_role = None
 bot.log_channel = None
-bot.active_tickets = {}  # user_id -> channel
+bot.active_tickets = {}
 bot.semaphore = asyncio.Semaphore(10)  # не более 10 тикетов одновременно
 
 # ---------- Категории ----------
@@ -131,7 +126,7 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
         asyncio.create_task(self._handle(interaction))
 
     async def _handle(self, interaction: discord.Interaction):
-        async with bot.semaphore:  # ограничиваем параллельность
+        async with bot.semaphore:
             try:
                 steam = self.steamid.value.strip()
                 if not steam.isdigit():
@@ -222,7 +217,7 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
                 await interaction.followup.send("❌ Внутренняя ошибка.", ephemeral=True)
                 print(f"Ошибка: {e}")
 
-# ---------- Кнопки категорий, закрытия, проверки (без изменений) ----------
+# ---------- Кнопки ----------
 class TicketCategoryButton(discord.ui.Button):
     def __init__(self, label: str, category_name: str, emoji: str, style: discord.ButtonStyle):
         super().__init__(label=label, style=style, custom_id=f"ticket_{category_name}", emoji=emoji)
@@ -297,7 +292,7 @@ class VerifyTicketButton(discord.ui.Button):
         close_btn = CloseTicketButton()
         await close_btn._close(interaction, True)
 
-# ---------- Представление с кнопками (кэш) ----------
+# ---------- Представление (кэш) ----------
 class TicketSetupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -305,7 +300,7 @@ class TicketSetupView(discord.ui.View):
             self.add_item(TicketCategoryButton(label=label, category_name=label, emoji=emoji, style=style))
 ticket_setup_view = TicketSetupView()
 
-# ---------- Команда /ticket_setup (только админы) ----------
+# ---------- Команда /ticket_setup ----------
 @bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками")
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
@@ -329,7 +324,7 @@ async def close_ticket(interaction: discord.Interaction):
     close_btn = CloseTicketButton()
     await close_btn._close(interaction, False)
 
-# ---------- Обработчик сообщений (логирование) ----------
+# ---------- Обработчик сообщений ----------
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -349,7 +344,7 @@ async def on_message(message):
     await write_ticket_log(ticket_number, f"{message.author} (ID:{message.author.id}): {message.content}")
     await bot.process_commands(message)
 
-# ---------- Веб-сервер для health check ----------
+# ---------- Веб-сервер health check ----------
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
@@ -387,9 +382,6 @@ async def on_ready():
 
 # ---------- Запуск ----------
 async def main():
-    # Настройка asyncio для 4 ядер
-    loop = asyncio.get_event_loop()
-    loop.set_default_executor(None)  # используем стандартный ThreadPoolExecutor с числом потоков = CPU
     asyncio.create_task(start_web_server())
     await bot.start(TOKEN)
 
