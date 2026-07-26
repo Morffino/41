@@ -38,6 +38,36 @@ def save_counter():
     with open(COUNTER_FILE, "w") as f:
         f.write(str(ticket_counter))
 
+# ---------- Логирование (исправлено) ----------
+LOG_DIR = "logs"
+# Если есть файл logs, удаляем его, чтобы создать папку
+if os.path.exists(LOG_DIR) and not os.path.isdir(LOG_DIR):
+    os.remove(LOG_DIR)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+log_lock = asyncio.Lock()
+
+def get_log_path(ticket_number: int) -> str:
+    return os.path.join(LOG_DIR, f"ticket-{ticket_number:05d}.log")
+
+async def write_ticket_log(ticket_number: int, text: str):
+    async with log_lock:
+        path = get_log_path(ticket_number)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
+
+async def read_ticket_log(ticket_number: int) -> str:
+    path = get_log_path(ticket_number)
+    if not os.path.exists(path):
+        return "Лог пуст."
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+async def delete_ticket_log(ticket_number: int):
+    path = get_log_path(ticket_number)
+    if os.path.exists(path):
+        os.remove(path)
+
 # ---------- Бот ----------
 intents = discord.Intents.default()
 intents.message_content = True
@@ -117,6 +147,14 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
 
         bot.ticket_open_time[current_number] = datetime.now()
 
+        # Логируем открытие
+        await write_ticket_log(current_number, f"🟢 ТИКЕТ ОТКРЫТ")
+        await write_ticket_log(current_number, f"   Пользователь: {interaction.user}")
+        await write_ticket_log(current_number, f"   Категория: {self.category_name}")
+        await write_ticket_log(current_number, f"   SteamID64: {steam}")
+        await write_ticket_log(current_number, f"   Ник: {self.nickname.value}")
+        await write_ticket_log(current_number, f"   Проблема: {self.brief.value}")
+
         embed = discord.Embed(title="Информация о тикете", color=discord.Color.blue())
         embed.add_field(name="Категория", value=self.category_name, inline=False)
         embed.add_field(name="SteamID64", value=steam, inline=False)
@@ -177,7 +215,12 @@ class CloseTicketButton(discord.ui.Button):
         await interaction.response.send_message("⏳ Тикет закрывается...", ephemeral=True)
 
         if ticket_number:
-            # Отправляем уведомление в ЛС создателю
+            status = "ПРОВЕРЕН" if verified else "ЗАКРЫТ"
+            # Логируем закрытие
+            await write_ticket_log(ticket_number, f"🔴 ТИКЕТ {status}")
+            await write_ticket_log(ticket_number, f"   Закрыл: {interaction.user}")
+
+            # Уведомление в ЛС создателю
             try:
                 creator = await interaction.guild.fetch_member(creator_id)
                 if creator:
@@ -198,14 +241,25 @@ class CloseTicketButton(discord.ui.Button):
             except Exception as e:
                 print(f"⚠️ Не удалось отправить ЛС: {e}")
 
-            # Отправляем краткое уведомление в лог-канал (без файла лога)
+            # Отправляем лог-файл в канал
             log_channel = bot.log_channel
             if log_channel:
-                status = "ПРОВЕРЕН" if verified else "ЗАКРЫТ"
-                try:
-                    await log_channel.send(f"🔒 Тикет #{ticket_number:05d} {status}")
-                except:
-                    pass
+                log_content = await read_ticket_log(ticket_number)
+                if log_content.strip():
+                    temp_path = f"/tmp/ticket_{ticket_number:05d}.log"
+                    with open(temp_path, "w", encoding="utf-8") as f:
+                        f.write(log_content)
+                    try:
+                        await log_channel.send(
+                            f"📄 Лог тикета #{ticket_number:05d} ({status})",
+                            file=discord.File(temp_path, filename=f"ticket_{ticket_number:05d}.log")
+                        )
+                    except:
+                        pass
+                    os.remove(temp_path)
+                else:
+                    await log_channel.send(f"📄 Лог тикета #{ticket_number:05d} пуст.")
+            await delete_ticket_log(ticket_number)
 
             if ticket_number in bot.ticket_open_time:
                 del bot.ticket_open_time[ticket_number]
@@ -262,6 +316,31 @@ async def ticket_setup(interaction: discord.Interaction):
 async def close_ticket(interaction: discord.Interaction):
     close_btn = CloseTicketButton()
     await close_btn._close(interaction, verified=False)
+
+# ---------- Обработчик сообщений (логирование переписки) ----------
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        await bot.process_commands(message)
+        return
+
+    if not message.channel.category or message.channel.category.id != TICKET_CATEGORY_ID:
+        await bot.process_commands(message)
+        return
+
+    channel_name = message.channel.name
+    if not channel_name.startswith("ticket-"):
+        await bot.process_commands(message)
+        return
+
+    try:
+        ticket_number = int(channel_name.split('-')[1])
+    except:
+        await bot.process_commands(message)
+        return
+
+    await write_ticket_log(ticket_number, f"💬 {message.author}: {message.content}")
+    await bot.process_commands(message)
 
 # ---------- Веб-сервер ----------
 async def health_check(request):
