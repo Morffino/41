@@ -75,7 +75,6 @@ bot.support_role = None
 bot.log_channel = None
 
 # ---------- Категории с эмодзи и цветами ----------
-# Формат: (название, идентификатор, эмодзи, цвет кнопки)
 CATEGORIES = [
     ("Общие вопросы", "general", "❓", discord.ButtonStyle.primary),
     ("Восстановление вещей", "restore", "📦", discord.ButtonStyle.success),
@@ -84,7 +83,7 @@ CATEGORIES = [
     ("Жалоба на Администрацию", "admin_report", "🚨", discord.ButtonStyle.danger)
 ]
 
-# ---------- Модальное окно ----------
+# ---------- Модальное окно (исправлено) ----------
 class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
     steamid = discord.ui.TextInput(
         label='SteamID64',
@@ -110,24 +109,27 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
     async def on_submit(self, interaction: discord.Interaction):
         global ticket_counter
 
+        # --- МГНОВЕННЫЙ ОТВЕТ ДИСКОРДУ (даём себе 15 минут) ---
+        await interaction.response.defer(ephemeral=True)
+
         steam = self.steamid.value.strip()
         if not steam.isdigit():
-            await interaction.response.send_message("❌ SteamID64 должен содержать только цифры.", ephemeral=True)
+            await interaction.followup.send("❌ SteamID64 должен содержать только цифры.", ephemeral=True)
             return
         if len(steam) > 20:
-            await interaction.response.send_message("❌ SteamID64 слишком длинный (максимум 20 цифр).", ephemeral=True)
+            await interaction.followup.send("❌ SteamID64 слишком длинный (максимум 20 цифр).", ephemeral=True)
             return
 
         guild = interaction.guild
         category = bot.category
         support_role = bot.support_role
         if not category or not support_role:
-            await interaction.response.send_message("❌ Сервер не настроен правильно (категория или роль не найдены).", ephemeral=True)
+            await interaction.followup.send("❌ Сервер не настроен правильно (категория или роль не найдены).", ephemeral=True)
             return
 
         existing = discord.utils.get(category.channels, topic=str(interaction.user.id))
         if existing:
-            await interaction.response.send_message(f"⚠️ У вас уже есть открытый тикет: {existing.mention}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ У вас уже есть открытый тикет: {existing.mention}", ephemeral=True)
             return
 
         async with counter_lock:
@@ -151,7 +153,7 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
                 topic=str(interaction.user.id)
             )
         except Exception as e:
-            await interaction.response.send_message(f"❌ Ошибка создания канала: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Ошибка создания канала: {e}", ephemeral=True)
             async with counter_lock:
                 ticket_counter = current_number
                 save_counter()
@@ -185,13 +187,13 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
             log_embed.add_field(name="Категория", value=self.category_name, inline=False)
             await log_channel.send(embed=log_embed)
 
-        await interaction.response.send_message(f"✅ Тикет создан! Перейдите в {channel.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ Тикет создан! Перейдите в {channel.mention}", ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
-        await interaction.response.send_message("❌ Произошла ошибка при отправке формы.", ephemeral=True)
+        await interaction.followup.send("❌ Произошла ошибка при отправке формы.", ephemeral=True)
         print(f"Ошибка в модальном окне: {error}")
 
-# ---------- Кнопка категории (с эмодзи и цветом) ----------
+# ---------- Кнопка категории ----------
 class TicketCategoryButton(discord.ui.Button):
     def __init__(self, label: str, category_name: str, emoji: str, style: discord.ButtonStyle):
         super().__init__(label=label, style=style, custom_id=f"ticket_{category_name}", emoji=emoji)
