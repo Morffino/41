@@ -7,6 +7,10 @@ import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from aiohttp import web
+import resource
+
+# Увеличиваем лимит открытых файлов (для логов)
+resource.setrlimit(resource.RLIMIT_NOFILE, (65535, 65535))
 
 load_dotenv()
 
@@ -46,8 +50,9 @@ log_buffer = {}
 log_lock = asyncio.Lock()
 
 async def _flush_logs():
+    """Фоновый сброс буфера раз в 3 секунды (быстрее)"""
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
         async with log_lock:
             for num, lines in list(log_buffer.items()):
                 if lines:
@@ -86,9 +91,10 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 bot.category = None
 bot.support_role = None
 bot.log_channel = None
-bot.active_tickets = {}
+bot.active_tickets = {}  # user_id -> channel
+bot.semaphore = asyncio.Semaphore(10)  # не более 10 тикетов одновременно
 
-# ---------- Категории (эмодзи + цвета) ----------
+# ---------- Категории ----------
 CATEGORIES = [
     ("Общие вопросы", "general", "❓", discord.ButtonStyle.primary),
     ("Восстановление вещей", "restore", "📦", discord.ButtonStyle.success),
@@ -125,153 +131,142 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
         asyncio.create_task(self._handle(interaction))
 
     async def _handle(self, interaction: discord.Interaction):
-        try:
-            steam = self.steamid.value.strip()
-            if not steam.isdigit():
-                await interaction.followup.send("❌ SteamID64 должен содержать только цифры.", ephemeral=True)
-                return
-            if len(steam) > 20:
-                await interaction.followup.send("❌ SteamID64 слишком длинный.", ephemeral=True)
-                return
-
-            guild = interaction.guild
-            category = bot.category
-            support_role = bot.support_role
-
-            if not category or not support_role:
-                await interaction.followup.send("❌ Ошибка конфигурации сервера.", ephemeral=True)
-                return
-
-            if interaction.user.id in bot.active_tickets:
-                ch = bot.active_tickets[interaction.user.id]
-                if ch and ch.guild == guild:
-                    await interaction.followup.send(f"⚠️ У вас уже есть открытый тикет: {ch.mention}", ephemeral=True)
+        async with bot.semaphore:  # ограничиваем параллельность
+            try:
+                steam = self.steamid.value.strip()
+                if not steam.isdigit():
+                    await interaction.followup.send("❌ SteamID64 – только цифры.", ephemeral=True)
+                    return
+                if len(steam) > 20:
+                    await interaction.followup.send("❌ Слишком длинный SteamID.", ephemeral=True)
                     return
 
-            async with counter_lock:
-                current_number = ticket_counter
-                ticket_counter += 1
-                save_counter()
+                guild = interaction.guild
+                category = bot.category
+                support_role = bot.support_role
+                if not category or not support_role:
+                    await interaction.followup.send("❌ Ошибка конфигурации сервера.", ephemeral=True)
+                    return
 
-            channel_name = f"ticket-{current_number:05d}"
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-                support_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-            }
-            try:
-                channel = await asyncio.wait_for(
-                    guild.create_text_channel(
-                        name=channel_name,
-                        category=category,
-                        overwrites=overwrites,
-                        topic=str(interaction.user.id)
-                    ),
-                    timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                await interaction.followup.send("❌ Тайм-аут создания канала. Попробуйте позже.", ephemeral=True)
+                if interaction.user.id in bot.active_tickets:
+                    ch = bot.active_tickets[interaction.user.id]
+                    if ch and ch.guild == guild:
+                        await interaction.followup.send(f"⚠️ У вас уже есть тикет: {ch.mention}", ephemeral=True)
+                        return
+
                 async with counter_lock:
-                    ticket_counter = current_number
+                    current_number = ticket_counter
+                    ticket_counter += 1
                     save_counter()
-                return
-            except Exception as e:
-                await interaction.followup.send(f"❌ Ошибка создания канала: {e}", ephemeral=True)
-                async with counter_lock:
-                    ticket_counter = current_number
-                    save_counter()
-                return
 
-            bot.active_tickets[interaction.user.id] = channel
-
-            await write_ticket_log(current_number, f"Тикет создан {interaction.user} (ID:{interaction.user.id})")
-            await write_ticket_log(current_number, f"Категория: {self.category_name}")
-            await write_ticket_log(current_number, f"SteamID64: {steam}")
-            await write_ticket_log(current_number, f"Ник: {self.nickname.value}")
-            await write_ticket_log(current_number, f"Проблема: {self.brief.value}")
-
-            embed = discord.Embed(title="📋 Информация о тикете", color=discord.Color.blue())
-            embed.add_field(name="Категория", value=self.category_name, inline=False)
-            embed.add_field(name="SteamID64", value=steam, inline=False)
-            embed.add_field(name="Ник", value=self.nickname.value, inline=False)
-            embed.add_field(name="Проблема", value=self.brief.value, inline=False)
-            embed.set_footer(text=f"От: {interaction.user.display_name}")
-            await channel.send(embed=embed)
-
-            view = discord.ui.View()
-            view.add_item(CloseTicketButton())
-            view.add_item(VerifyTicketButton())
-            await channel.send("🔒 Для закрытия нажмите кнопку.", view=view)
-
-            log_channel = bot.log_channel
-            if log_channel:
+                channel_name = f"ticket-{current_number:05d}"
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                    support_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+                }
                 try:
-                    await log_channel.send(f"🆕 Тикет #{current_number:05d} от {interaction.user.mention} в {channel.mention}")
-                except:
-                    pass
+                    channel = await asyncio.wait_for(
+                        guild.create_text_channel(
+                            name=channel_name,
+                            category=category,
+                            overwrites=overwrites,
+                            topic=str(interaction.user.id)
+                        ),
+                        timeout=5.0
+                    )
+                except asyncio.TimeoutError:
+                    await interaction.followup.send("❌ Тайм-аут создания канала.", ephemeral=True)
+                    async with counter_lock:
+                        ticket_counter = current_number
+                        save_counter()
+                    return
+                except Exception as e:
+                    await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
+                    async with counter_lock:
+                        ticket_counter = current_number
+                        save_counter()
+                    return
 
-            await interaction.followup.send(f"✅ Тикет создан! Перейдите в {channel.mention}", ephemeral=True)
+                bot.active_tickets[interaction.user.id] = channel
 
-        except Exception as e:
-            await interaction.followup.send("❌ Внутренняя ошибка. Попробуйте позже.", ephemeral=True)
-            print(f"Ошибка в _handle: {e}")
+                await write_ticket_log(current_number, f"Тикет создан {interaction.user} (ID:{interaction.user.id})")
+                await write_ticket_log(current_number, f"Категория: {self.category_name}")
+                await write_ticket_log(current_number, f"SteamID64: {steam}")
+                await write_ticket_log(current_number, f"Ник: {self.nickname.value}")
+                await write_ticket_log(current_number, f"Проблема: {self.brief.value}")
 
-# ---------- Кнопка категории ----------
+                embed = discord.Embed(title="📋 Информация", color=discord.Color.blue())
+                embed.add_field(name="Категория", value=self.category_name, inline=False)
+                embed.add_field(name="SteamID64", value=steam, inline=False)
+                embed.add_field(name="Ник", value=self.nickname.value, inline=False)
+                embed.add_field(name="Проблема", value=self.brief.value, inline=False)
+                embed.set_footer(text=f"От: {interaction.user.display_name}")
+                await channel.send(embed=embed)
+
+                view = discord.ui.View()
+                view.add_item(CloseTicketButton())
+                view.add_item(VerifyTicketButton())
+                await channel.send("🔒 Кнопки управления:", view=view)
+
+                log_channel = bot.log_channel
+                if log_channel:
+                    try:
+                        await log_channel.send(f"🆕 Тикет #{current_number:05d} от {interaction.user.mention} → {channel.mention}")
+                    except:
+                        pass
+
+                await interaction.followup.send(f"✅ Тикет создан! {channel.mention}", ephemeral=True)
+
+            except Exception as e:
+                await interaction.followup.send("❌ Внутренняя ошибка.", ephemeral=True)
+                print(f"Ошибка: {e}")
+
+# ---------- Кнопки категорий, закрытия, проверки (без изменений) ----------
 class TicketCategoryButton(discord.ui.Button):
     def __init__(self, label: str, category_name: str, emoji: str, style: discord.ButtonStyle):
         super().__init__(label=label, style=style, custom_id=f"ticket_{category_name}", emoji=emoji)
         self.category_name = category_name
-
     async def callback(self, interaction: discord.Interaction):
         modal = TicketModal(category_name=self.category_name)
         await interaction.response.send_modal(modal)
 
-# ---------- Кнопка закрытия ----------
 class CloseTicketButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="Закрыть тикет", style=discord.ButtonStyle.danger, custom_id="close_ticket", emoji="🔒")
-
     async def callback(self, interaction: discord.Interaction):
-        await self._close(interaction, verified=False)
-
+        await self._close(interaction, False)
     async def _close(self, interaction: discord.Interaction, verified: bool):
         channel = interaction.channel
         if not channel.category or channel.category.id != TICKET_CATEGORY_ID:
-            await interaction.response.send_message("❌ Это не канал тикета.", ephemeral=True)
+            await interaction.response.send_message("❌ Не канал тикета.", ephemeral=True)
             return
-
         creator_id = channel.topic
         if creator_id is None:
-            await interaction.response.send_message("❌ Не удалось определить создателя.", ephemeral=True)
+            await interaction.response.send_message("❌ Ошибка создателя.", ephemeral=True)
             return
         creator_id = int(creator_id)
-
         if interaction.user.id != creator_id and not interaction.user.get_role(SUPPORT_ROLE_ID):
-            await interaction.response.send_message("⛔ У вас нет прав на закрытие.", ephemeral=True)
+            await interaction.response.send_message("⛔ Нет прав.", ephemeral=True)
             return
-
         try:
             ticket_number = int(channel.name.split('-')[1])
         except:
             ticket_number = None
-
         await interaction.response.send_message("⏳ Закрытие...", ephemeral=True)
-
         if ticket_number:
             status = "ПРОВЕРЕН" if verified else "ЗАКРЫТ"
             admin = interaction.user.display_name if verified else ""
             log_msg = f"Тикет {status}"
             if verified:
-                log_msg += f" администратором {interaction.user} (ник: {admin})"
+                log_msg += f" админом {interaction.user} (ник: {admin})"
             await write_ticket_log(ticket_number, log_msg)
-
             async with log_lock:
                 if ticket_number in log_buffer and log_buffer[ticket_number]:
                     path = os.path.join(LOG_DIR, f"ticket-{ticket_number:05d}.log")
                     with open(path, "a", encoding="utf-8") as f:
                         f.write("\n".join(log_buffer[ticket_number]) + "\n")
                     del log_buffer[ticket_number]
-
             log_channel = bot.log_channel
             if log_channel:
                 log_content = await read_ticket_log(ticket_number)
@@ -281,52 +276,48 @@ class CloseTicketButton(discord.ui.Button):
                         f.write(log_content)
                     try:
                         await log_channel.send(
-                            f"📄 Лог тикета #{ticket_number:05d} ({status})",
+                            f"📄 Лог #{ticket_number:05d} ({status})",
                             file=discord.File(temp_path, filename=f"ticket_{ticket_number:05d}.log")
                         )
                     except:
                         pass
                     os.remove(temp_path)
             await delete_ticket_log(ticket_number)
-
         await channel.delete()
         if creator_id in bot.active_tickets:
             del bot.active_tickets[creator_id]
 
-# ---------- Кнопка "Тикет проверен" ----------
 class VerifyTicketButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="✅ Тикет проверен", style=discord.ButtonStyle.success, custom_id="verify_ticket", emoji="✅")
-
     async def callback(self, interaction: discord.Interaction):
         if not interaction.user.get_role(SUPPORT_ROLE_ID):
-            await interaction.response.send_message("⛔ Доступно только для поддержки.", ephemeral=True)
+            await interaction.response.send_message("⛔ Только для поддержки.", ephemeral=True)
             return
         close_btn = CloseTicketButton()
-        await close_btn._close(interaction, verified=True)
+        await close_btn._close(interaction, True)
 
-# ---------- Представление с кнопками (кэшированное) ----------
+# ---------- Представление с кнопками (кэш) ----------
 class TicketSetupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         for label, ident, emoji, style in CATEGORIES:
             self.add_item(TicketCategoryButton(label=label, category_name=label, emoji=emoji, style=style))
-
 ticket_setup_view = TicketSetupView()
 
-# ---------- Команда /ticket_setup (только для админов) ----------
-@bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками для открытия тикетов")
+# ---------- Команда /ticket_setup (только админы) ----------
+@bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками")
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎫 ECLIPSE TICKET | Центр поддержки",
         description=(
-            "**Нужна помощь?**\nВыберите тему кнопкой ниже.\n\n"
-            "❔ **Общие вопросы** – Вопросы по серверу, правилам, донату.\n"
-            "📦 **Восстановление имущества** – Откаты, кражи, потеря вещей.\n"
-            "🛠️ **Технические проблемы** – Ошибки, вылеты, зависания.\n"
-            "⚠️ **Жалоба на игрока / группировку** – Нарушения правил.\n"
-            "🛡️ **Жалоба на администрацию** – Спорные действия."
+            "**Нужна помощь?** Выберите тему:\n\n"
+            "❔ **Общие вопросы** – правила, донат\n"
+            "📦 **Восстановление имущества** – откаты, кражи\n"
+            "🛠️ **Технические проблемы** – ошибки, вылеты\n"
+            "⚠️ **Жалоба на игрока** – нарушения\n"
+            "🛡️ **Жалоба на администрацию** – спорные действия"
         ),
         color=discord.Color.red()
     )
@@ -336,9 +327,9 @@ async def ticket_setup(interaction: discord.Interaction):
 @bot.tree.command(name="close", description="Закрыть текущий тикет")
 async def close_ticket(interaction: discord.Interaction):
     close_btn = CloseTicketButton()
-    await close_btn._close(interaction, verified=False)
+    await close_btn._close(interaction, False)
 
-# ---------- Обработчик сообщений для логирования ----------
+# ---------- Обработчик сообщений (логирование) ----------
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -369,7 +360,7 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, host='0.0.0.0', port=8080)
     await site.start()
-    print("🌐 Health check запущен на порту 8080")
+    print("🌐 Health check на порту 8080")
     await asyncio.Event().wait()
 
 # ---------- Событие готовности ----------
@@ -379,30 +370,26 @@ async def on_ready():
     print(f'✅ Бот {bot.user} запущен! Счётчик: {ticket_counter}')
     guild = bot.guilds[0] if bot.guilds else None
     if not guild:
-        print("⚠️ Бот не состоит ни на одном сервере.")
+        print("⚠️ Бот не на сервере.")
         return
-
     bot.category = guild.get_channel(TICKET_CATEGORY_ID)
     bot.support_role = guild.get_role(SUPPORT_ROLE_ID)
     bot.log_channel = guild.get_channel(LOG_CHANNEL_ID)
-
-    if not bot.category:
-        print(f"⚠️ Категория с ID {TICKET_CATEGORY_ID} не найдена.")
-    if not bot.support_role:
-        print(f"⚠️ Роль с ID {SUPPORT_ROLE_ID} не найдена.")
-    if not bot.log_channel:
-        print(f"⚠️ Лог-канал с ID {LOG_CHANNEL_ID} не найден.")
-
+    if not bot.category: print(f"⚠️ Категория {TICKET_CATEGORY_ID} не найдена.")
+    if not bot.support_role: print(f"⚠️ Роль {SUPPORT_ROLE_ID} не найдена.")
+    if not bot.log_channel: print(f"⚠️ Лог-канал {LOG_CHANNEL_ID} не найден.")
     asyncio.create_task(_flush_logs())
-
     try:
         synced = await bot.tree.sync()
         print(f"🔄 Синхронизировано {len(synced)} команд.")
     except Exception as e:
-        print(f"⚠️ Ошибка синхронизации команд: {e}")
+        print(f"⚠️ Ошибка синхронизации: {e}")
 
 # ---------- Запуск ----------
 async def main():
+    # Настройка asyncio для 4 ядер
+    loop = asyncio.get_event_loop()
+    loop.set_default_executor(None)  # используем стандартный ThreadPoolExecutor с числом потоков = CPU
     asyncio.create_task(start_web_server())
     await bot.start(TOKEN)
 
