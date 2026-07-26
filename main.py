@@ -394,7 +394,7 @@ class TicketSetupView(discord.ui.View):
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🎫 HS TICKET | Центр поддержки",
+        title="🎫 ECLIPSE TICKET | Центр поддержки",
         description=(
             "**Нужна помощь, восстановление или разбор ситуации?**\n"
             "Выберите подходящую тему кнопкой ниже, укажите свой **SteamID64** и кратко опишите обращение.\n\n"
