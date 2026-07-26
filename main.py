@@ -11,42 +11,25 @@ load_dotenv()
 
 # ---------- Конфигурация ----------
 TOKEN = os.getenv('DISCORD_TOKEN')
-TICKET_CATEGORY_ID = os.getenv('TICKET_CATEGORY_ID')
-SUPPORT_ROLE_ID = os.getenv('SUPPORT_ROLE_ID')
-LOG_CHANNEL_ID = os.getenv('LOG_CHANNEL_ID')
+TICKET_CATEGORY_ID = int(os.getenv('TICKET_CATEGORY_ID', 0))
+SUPPORT_ROLE_ID = int(os.getenv('SUPPORT_ROLE_ID', 0))
+LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
 
-missing = []
-if not TOKEN: missing.append('DISCORD_TOKEN')
-if not TICKET_CATEGORY_ID: missing.append('TICKET_CATEGORY_ID')
-if not SUPPORT_ROLE_ID: missing.append('SUPPORT_ROLE_ID')
-if not LOG_CHANNEL_ID: missing.append('LOG_CHANNEL_ID')
-
-if missing:
-    print("❌ Ошибка: не заданы переменные окружения:", ", ".join(missing))
-    sys.exit(1)
-
-try:
-    TICKET_CATEGORY_ID = int(TICKET_CATEGORY_ID)
-    SUPPORT_ROLE_ID = int(SUPPORT_ROLE_ID)
-    LOG_CHANNEL_ID = int(LOG_CHANNEL_ID)
-except ValueError:
-    print("❌ Ошибка: ID должны быть числами.")
+if not all([TOKEN, TICKET_CATEGORY_ID, SUPPORT_ROLE_ID, LOG_CHANNEL_ID]):
+    print("❌ Ошибка: не заданы все переменные окружения.")
     sys.exit(1)
 
 # ---------- Счётчик тикетов ----------
 COUNTER_FILE = "data/ticket_counter.txt"
-ticket_counter = 0
+ticket_counter = 1
 counter_lock = asyncio.Lock()
 
 def load_counter():
     global ticket_counter
-    if not os.path.exists(COUNTER_FILE):
-        ticket_counter = 1
-        return
-    try:
+    if os.path.exists(COUNTER_FILE):
         with open(COUNTER_FILE, "r") as f:
             ticket_counter = int(f.read().strip())
-    except:
+    else:
         ticket_counter = 1
 
 def save_counter():
@@ -59,6 +42,11 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Кэшируемые объекты
+bot.category = None
+bot.support_role = None
+bot.log_channel = None
 
 CATEGORIES = [
     ("Общие вопросы", "general"),
@@ -95,31 +83,32 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
     async def on_submit(self, interaction: discord.Interaction):
         global ticket_counter
         guild = interaction.guild
-        category = discord.utils.get(guild.categories, id=TICKET_CATEGORY_ID)
-        if not category:
-            await interaction.response.send_message("❌ Категория для тикетов не найдена.", ephemeral=True)
+
+        # Используем кэшированные объекты
+        category = bot.category
+        support_role = bot.support_role
+        if not category or not support_role:
+            await interaction.response.send_message("❌ Сервер не настроен правильно (категория или роль не найдены).", ephemeral=True)
             return
 
-        # Проверка на уже существующий тикет по пользователю
+        # Проверка существующего тикета у пользователя (поиск по topic)
         existing = discord.utils.get(category.channels, topic=str(interaction.user.id))
         if existing:
             await interaction.response.send_message(f"⚠️ У вас уже есть открытый тикет: {existing.mention}", ephemeral=True)
             return
 
-        # Получаем следующий номер тикета (с блокировкой)
+        # Получаем следующий номер
         async with counter_lock:
             current_number = ticket_counter
             ticket_counter += 1
             save_counter()
 
-        # Формируем имя канала: ticket-001, ticket-002, ... ticket-100000
-        channel_name = f"ticket-{current_number:05d}"  # 5 цифр с ведущими нулями
+        channel_name = f"ticket-{current_number:05d}"
 
-        # Права доступа
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            guild.get_role(SUPPORT_ROLE_ID): discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            support_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
         }
 
         try:
@@ -127,17 +116,17 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
                 name=channel_name,
                 category=category,
                 overwrites=overwrites,
-                topic=str(interaction.user.id)  # сохраняем создателя
+                topic=str(interaction.user.id)
             )
         except Exception as e:
             await interaction.response.send_message(f"❌ Ошибка создания канала: {e}", ephemeral=True)
-            # Откатываем счётчик, чтобы номер не потерялся
+            # Откат счётчика
             async with counter_lock:
                 ticket_counter = current_number
                 save_counter()
             return
 
-        # Отправляем данные в канал
+        # Отправка данных
         embed = discord.Embed(title="Информация о тикете", color=discord.Color.blue())
         embed.add_field(name="Категория", value=self.category_name, inline=False)
         embed.add_field(name="SteamID64", value=self.steamid.value, inline=False)
@@ -152,8 +141,8 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         view.add_item(close_btn)
         await channel.send("🔒 Для закрытия тикета нажмите кнопку ниже.", view=view)
 
-        # Логирование
-        log_channel = guild.get_channel(LOG_CHANNEL_ID)
+        # Логирование (используем кэшированный канал)
+        log_channel = bot.log_channel
         if log_channel:
             log_embed = discord.Embed(title="🆕 Новый тикет", color=discord.Color.gold())
             log_embed.add_field(name="Номер", value=f"#{current_number:05d}", inline=False)
@@ -169,7 +158,7 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         await interaction.response.send_message("❌ Произошла ошибка при отправке формы.", ephemeral=True)
-        print(error)
+        print(f"Ошибка в модальном окне: {error}")
 
 # ---------- Кнопка категории ----------
 class TicketCategoryButton(discord.ui.Button):
@@ -178,6 +167,7 @@ class TicketCategoryButton(discord.ui.Button):
         self.category_name = category_name
 
     async def callback(self, interaction: discord.Interaction):
+        # Мгновенно открываем модальное окно
         modal = TicketModal(category_name=self.category_name)
         await interaction.response.send_modal(modal)
 
@@ -204,7 +194,7 @@ class CloseTicketButton(discord.ui.Button):
 
         await interaction.response.send_message("⏳ Тикет закрывается...", ephemeral=True)
 
-        log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
+        log_channel = bot.log_channel
         if log_channel:
             log_embed = discord.Embed(title="🔒 Тикет закрыт", color=discord.Color.red())
             log_embed.add_field(name="Канал", value=channel.name, inline=False)
@@ -213,12 +203,15 @@ class CloseTicketButton(discord.ui.Button):
 
         await channel.delete()
 
-# ---------- Представление с кнопками ----------
+# ---------- Представление с кнопками (создаётся один раз) ----------
 class TicketSetupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         for label, _ in CATEGORIES:
             self.add_item(TicketCategoryButton(label=label, category_name=label))
+
+# Создаём экземпляр представления заранее
+ticket_setup_view = TicketSetupView()
 
 # ---------- Команда /ticket_setup ----------
 @bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками для открытия тикетов")
@@ -232,12 +225,12 @@ async def ticket_setup(interaction: discord.Interaction):
         ),
         color=discord.Color.blue()
     )
-    view = TicketSetupView()
-    await interaction.response.send_message(embed=embed, view=view)
+    await interaction.response.send_message(embed=embed, view=ticket_setup_view)
 
 # ---------- Команда /close ----------
 @bot.tree.command(name="close", description="Закрыть текущий тикет")
 async def close_ticket(interaction: discord.Interaction):
+    # Аналогично кнопке, но можно дублировать код или вызвать через отдельную функцию
     channel = interaction.channel
     if not channel.category or channel.category.id != TICKET_CATEGORY_ID:
         await interaction.response.send_message("❌ Это не канал тикета.", ephemeral=True)
@@ -251,7 +244,7 @@ async def close_ticket(interaction: discord.Interaction):
         await interaction.response.send_message("⛔ У вас нет прав на закрытие.", ephemeral=True)
         return
     await interaction.response.send_message("⏳ Тикет закрывается...", ephemeral=True)
-    log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
+    log_channel = bot.log_channel
     if log_channel:
         log_embed = discord.Embed(title="🔒 Тикет закрыт", color=discord.Color.red())
         log_embed.add_field(name="Канал", value=channel.name, inline=False)
@@ -276,8 +269,27 @@ async def start_web_server():
 # ---------- Событие готовности ----------
 @bot.event
 async def on_ready():
+    global ticket_counter
     load_counter()
-    print(f'✅ Бот {bot.user} запущен! Текущий счётчик тикетов: {ticket_counter}')
+    print(f'✅ Бот {bot.user} запущен! Текущий счётчик: {ticket_counter}')
+
+    # Кэшируем объекты для быстрого доступа
+    guild = bot.guilds[0]  # Предполагаем, что бот только на одном сервере
+    if not guild:
+        print("⚠️ Бот не состоит ни на одном сервере.")
+        return
+
+    bot.category = guild.get_channel(TICKET_CATEGORY_ID)
+    bot.support_role = guild.get_role(SUPPORT_ROLE_ID)
+    bot.log_channel = guild.get_channel(LOG_CHANNEL_ID)
+
+    if not bot.category:
+        print(f"⚠️ Категория с ID {TICKET_CATEGORY_ID} не найдена.")
+    if not bot.support_role:
+        print(f"⚠️ Роль с ID {SUPPORT_ROLE_ID} не найдена.")
+    if not bot.log_channel:
+        print(f"⚠️ Лог-канал с ID {LOG_CHANNEL_ID} не найден.")
+
     try:
         synced = await bot.tree.sync()
         print(f"🔄 Синхронизировано {len(synced)} команд.")
