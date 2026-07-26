@@ -3,6 +3,10 @@ import asyncio
 from datetime import datetime
 
 LOG_DIR = "logs"
+
+# --- Исправление: если есть файл logs, удаляем его ---
+if os.path.exists(LOG_DIR) and not os.path.isdir(LOG_DIR):
+    os.remove(LOG_DIR)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 log_lock = asyncio.Lock()
