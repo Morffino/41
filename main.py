@@ -38,7 +38,7 @@ def save_counter():
     with open(COUNTER_FILE, "w") as f:
         f.write(str(ticket_counter))
 
-# ---------- Логирование (исправлено) ----------
+# ---------- Логирование ----------
 LOG_DIR = "logs"
 if os.path.exists(LOG_DIR) and not os.path.isdir(LOG_DIR):
     os.remove(LOG_DIR)
@@ -160,7 +160,7 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
 
         bot.ticket_open_time[current_number] = datetime.now()
 
-        # Логируем открытие
+        # --- Логируем открытие ---
         await write_ticket_log(current_number, f"🟢 ТИКЕТ ОТКРЫТ")
         await write_ticket_log(current_number, f"   Пользователь: {interaction.user}")
         await write_ticket_log(current_number, f"   Категория: {self.category_name}")
@@ -168,6 +168,23 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         await write_ticket_log(current_number, f"   Ник: {self.nickname.value}")
         await write_ticket_log(current_number, f"   Проблема: {self.brief.value}")
 
+        # --- Отправляем игроку ЛС с приглашением описать подробнее ---
+        try:
+            embed_welcome = discord.Embed(
+                title=f"🎫 Тикет #{current_number:05d} создан",
+                description=(
+                    "**Теперь опишите подробнее ситуацию**\n"
+                    "Прикрепите доказательства, если они нужны (скриншоты, видео, логи).\n\n"
+                    "Общайтесь в созданном канале, администраторы скоро ответят."
+                ),
+                color=discord.Color.green()
+            )
+            embed_welcome.set_footer(text="Команда поддержки ECLIPSE RP")
+            await interaction.user.send(embed=embed_welcome)
+        except:
+            pass  # если пользователь запретил ЛС, просто игнорируем
+
+        # --- Embed в канал тикета ---
         embed = discord.Embed(title="Информация о тикете", color=discord.Color.blue())
         embed.add_field(name="Категория", value=self.category_name, inline=False)
         embed.add_field(name="SteamID64", value=steam, inline=False)
@@ -176,12 +193,13 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         embed.set_footer(text=f"От: {interaction.user.display_name}")
         await channel.send(embed=embed)
 
-        # --- Кнопки управления тикетом ---
+        # --- Кнопки управления ---
         view = discord.ui.View()
-        view.add_item(CloseTicketButton())          # простая кнопка
-        view.add_item(CloseWithReasonButton())      # новая кнопка для админов
+        view.add_item(CloseTicketButton())
+        view.add_item(CloseWithReasonButton())
         await channel.send("🔒 Кнопки управления:", view=view)
 
+        # --- Уведомление в лог-канал ---
         log_channel = bot.log_channel
         if log_channel:
             log_embed = discord.Embed(title="🆕 Новый тикет", color=discord.Color.gold())
@@ -230,13 +248,24 @@ class CloseTicketButton(discord.ui.Button):
 
         if ticket_number:
             status = "ПРОВЕРЕН" if verified else "ЗАКРЫТ"
-            # Логируем закрытие
+
+            # --- Логируем закрытие ---
             await write_ticket_log(ticket_number, f"🔴 ТИКЕТ {status}")
             await write_ticket_log(ticket_number, f"   Закрыл: {interaction.user}")
             if reason:
                 await write_ticket_log(ticket_number, f"   Причина: {reason}")
 
-            # Отправляем уведомление в ЛС создателю
+            # --- Собираем краткий лог переписки (без ботов) ---
+            log_lines = []
+            try:
+                async for msg in channel.history(limit=100, oldest_first=True):
+                    if not msg.author.bot:
+                        log_lines.append(f"**{msg.author.display_name}**: {msg.content}")
+                log_text = "\n".join(log_lines) if log_lines else "Нет сообщений."
+            except:
+                log_text = "Не удалось прочитать историю."
+
+            # --- Отправляем ЛС создателю с кратким логом и причиной ---
             try:
                 creator = await interaction.guild.fetch_member(creator_id)
                 if creator:
@@ -250,16 +279,14 @@ class CloseTicketButton(discord.ui.Button):
                     embed.add_field(name="Закрыл тикет", value=interaction.user.mention, inline=False)
                     embed.add_field(name="Тикет открыт", value=open_time.strftime("%d %B %Y г. %H:%M"), inline=False)
                     embed.add_field(name="Тикет закрыт", value=close_time.strftime("%d %B %Y г. %H:%M"), inline=False)
-                    if reason:
-                        embed.add_field(name="Причина закрытия", value=reason, inline=False)
-                    else:
-                        embed.add_field(name="Причина закрытия", value="Не указана", inline=False)
+                    embed.add_field(name="Причина закрытия", value=reason if reason else "Не указана", inline=False)
+                    embed.add_field(name="📜 Краткий лог переписки", value=log_text[:1024], inline=False)
                     embed.set_footer(text=close_time.strftime("%d.%m.%Y %H:%M"))
                     await creator.send(embed=embed)
             except Exception as e:
                 print(f"⚠️ Не удалось отправить ЛС: {e}")
 
-            # Отправляем лог-файл в канал
+            # --- Отправляем полный лог-файл в лог-канал ---
             log_channel = bot.log_channel
             if log_channel:
                 log_content = await read_ticket_log(ticket_number)
@@ -284,7 +311,7 @@ class CloseTicketButton(discord.ui.Button):
 
         await channel.delete()
 
-# ---------- Кнопка закрытия с причиной (только для поддержки) ----------
+# ---------- Кнопка закрытия с причиной ----------
 class CloseWithReasonButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="Закрыть с причиной", style=discord.ButtonStyle.secondary, custom_id="close_with_reason")
