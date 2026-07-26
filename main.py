@@ -15,14 +15,13 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 TICKET_CATEGORY_ID = int(os.getenv('TICKET_CATEGORY_ID', 0))
 SUPPORT_ROLE_ID = int(os.getenv('SUPPORT_ROLE_ID', 0))
 LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
-ADMIN_CHANNEL_ID = int(os.getenv('ADMIN_CHANNEL_ID', 0))
 
-if not all([TOKEN, TICKET_CATEGORY_ID, SUPPORT_ROLE_ID, LOG_CHANNEL_ID, ADMIN_CHANNEL_ID]):
+if not all([TOKEN, TICKET_CATEGORY_ID, SUPPORT_ROLE_ID, LOG_CHANNEL_ID]):
     print("❌ Ошибка: не заданы все переменные окружения.")
-    print("Необходимы: DISCORD_TOKEN, TICKET_CATEGORY_ID, SUPPORT_ROLE_ID, LOG_CHANNEL_ID, ADMIN_CHANNEL_ID")
+    print("Необходимы: DISCORD_TOKEN, TICKET_CATEGORY_ID, SUPPORT_ROLE_ID, LOG_CHANNEL_ID")
     sys.exit(1)
 
-# ---------- Счётчик тикетов (сохраняется в файл) ----------
+# ---------- Счётчик тикетов ----------
 COUNTER_FILE = "data/ticket_counter.txt"
 ticket_counter = 1
 counter_lock = asyncio.Lock()
@@ -40,14 +39,13 @@ def save_counter():
     with open(COUNTER_FILE, "w") as f:
         f.write(str(ticket_counter))
 
-# ---------- Логирование (асинхронный буфер) ----------
+# ---------- Логирование (буферизованное) ----------
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 log_buffer = {}
 log_lock = asyncio.Lock()
 
 async def _flush_logs():
-    """Фоновый сброс буфера логов на диск раз в 5 секунд."""
     while True:
         await asyncio.sleep(5)
         async with log_lock:
@@ -62,7 +60,6 @@ async def _flush_logs():
                     del log_buffer[num]
 
 async def write_ticket_log(ticket_number: int, text: str):
-    """Быстрое добавление записи в буфер."""
     async with log_lock:
         if ticket_number not in log_buffer:
             log_buffer[ticket_number] = []
@@ -86,12 +83,10 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Кэш объектов (чтобы не искать каждый раз)
 bot.category = None
 bot.support_role = None
 bot.log_channel = None
-bot.admin_channel = None
-bot.active_tickets = {}  # user_id -> channel
+bot.active_tickets = {}
 
 # ---------- Категории (эмодзи + цвета) ----------
 CATEGORIES = [
@@ -102,7 +97,7 @@ CATEGORIES = [
     ("Жалоба на Администрацию", "admin_report", "🚨", discord.ButtonStyle.danger)
 ]
 
-# ---------- Модальное окно (максимально лёгкое) ----------
+# ---------- Модальное окно ----------
 class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
     steamid = discord.ui.TextInput(
         label='SteamID64',
@@ -126,9 +121,7 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
         self.category_name = category_name
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Мгновенный ответ Discord (снимает 3-секундный таймаут)
         await interaction.response.defer(ephemeral=True)
-        # Запуск фоновой обработки
         asyncio.create_task(self._handle(interaction))
 
     async def _handle(self, interaction: discord.Interaction):
@@ -149,20 +142,17 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
                 await interaction.followup.send("❌ Ошибка конфигурации сервера.", ephemeral=True)
                 return
 
-            # Проверка, есть ли уже открытый тикет (кэш)
             if interaction.user.id in bot.active_tickets:
                 ch = bot.active_tickets[interaction.user.id]
                 if ch and ch.guild == guild:
                     await interaction.followup.send(f"⚠️ У вас уже есть открытый тикет: {ch.mention}", ephemeral=True)
                     return
 
-            # Получаем номер
             async with counter_lock:
                 current_number = ticket_counter
                 ticket_counter += 1
                 save_counter()
 
-            # Создаём канал (с таймаутом 5 секунд)
             channel_name = f"ticket-{current_number:05d}"
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -192,17 +182,14 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
                     save_counter()
                 return
 
-            # Сохраняем в кэш активных тикетов
             bot.active_tickets[interaction.user.id] = channel
 
-            # Логирование (в буфер)
             await write_ticket_log(current_number, f"Тикет создан {interaction.user} (ID:{interaction.user.id})")
             await write_ticket_log(current_number, f"Категория: {self.category_name}")
             await write_ticket_log(current_number, f"SteamID64: {steam}")
             await write_ticket_log(current_number, f"Ник: {self.nickname.value}")
             await write_ticket_log(current_number, f"Проблема: {self.brief.value}")
 
-            # Embed в канале тикета
             embed = discord.Embed(title="📋 Информация о тикете", color=discord.Color.blue())
             embed.add_field(name="Категория", value=self.category_name, inline=False)
             embed.add_field(name="SteamID64", value=steam, inline=False)
@@ -211,13 +198,11 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
             embed.set_footer(text=f"От: {interaction.user.display_name}")
             await channel.send(embed=embed)
 
-            # Кнопки управления тикетом
             view = discord.ui.View()
             view.add_item(CloseTicketButton())
             view.add_item(VerifyTicketButton())
             await channel.send("🔒 Для закрытия нажмите кнопку.", view=view)
 
-            # Уведомление в лог-канал (краткое)
             log_channel = bot.log_channel
             if log_channel:
                 try:
@@ -225,7 +210,6 @@ class TicketModal(discord.ui.Modal, title='📩 Создание тикета'):
                 except:
                     pass
 
-            # Ответ пользователю
             await interaction.followup.send(f"✅ Тикет создан! Перейдите в {channel.mention}", ephemeral=True)
 
         except Exception as e:
@@ -281,7 +265,6 @@ class CloseTicketButton(discord.ui.Button):
                 log_msg += f" администратором {interaction.user} (ник: {admin})"
             await write_ticket_log(ticket_number, log_msg)
 
-            # Принудительный сброс буфера для этого тикета
             async with log_lock:
                 if ticket_number in log_buffer and log_buffer[ticket_number]:
                     path = os.path.join(LOG_DIR, f"ticket-{ticket_number:05d}.log")
@@ -289,7 +272,6 @@ class CloseTicketButton(discord.ui.Button):
                         f.write("\n".join(log_buffer[ticket_number]) + "\n")
                     del log_buffer[ticket_number]
 
-            # Отправка лога в лог-канал
             log_channel = bot.log_channel
             if log_channel:
                 log_content = await read_ticket_log(ticket_number)
@@ -307,9 +289,7 @@ class CloseTicketButton(discord.ui.Button):
                     os.remove(temp_path)
             await delete_ticket_log(ticket_number)
 
-        # Удаляем канал
         await channel.delete()
-        # Удаляем из кэша
         if creator_id in bot.active_tickets:
             del bot.active_tickets[creator_id]
 
@@ -334,17 +314,10 @@ class TicketSetupView(discord.ui.View):
 
 ticket_setup_view = TicketSetupView()
 
-# ---------- Команда /ticket_setup (только в админ-канале) ----------
-@bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками (только админы)")
+# ---------- Команда /ticket_setup (только для админов) ----------
+@bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками для открытия тикетов")
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
-    if interaction.channel_id != ADMIN_CHANNEL_ID:
-        await interaction.response.send_message(
-            "❌ Эта команда доступна только в специальном канале для администраторов.",
-            ephemeral=True
-        )
-        return
-
     embed = discord.Embed(
         title="🎫 ECLIPSE TICKET | Центр поддержки",
         description=(
@@ -359,7 +332,7 @@ async def ticket_setup(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, view=ticket_setup_view)
 
-# ---------- Команда /close (для закрытия) ----------
+# ---------- Команда /close ----------
 @bot.tree.command(name="close", description="Закрыть текущий тикет")
 async def close_ticket(interaction: discord.Interaction):
     close_btn = CloseTicketButton()
@@ -382,7 +355,6 @@ async def on_message(message):
     except:
         await bot.process_commands(message)
         return
-    # Логируем сообщение (в буфер)
     await write_ticket_log(ticket_number, f"{message.author} (ID:{message.author.id}): {message.content}")
     await bot.process_commands(message)
 
@@ -413,7 +385,6 @@ async def on_ready():
     bot.category = guild.get_channel(TICKET_CATEGORY_ID)
     bot.support_role = guild.get_role(SUPPORT_ROLE_ID)
     bot.log_channel = guild.get_channel(LOG_CHANNEL_ID)
-    bot.admin_channel = guild.get_channel(ADMIN_CHANNEL_ID)
 
     if not bot.category:
         print(f"⚠️ Категория с ID {TICKET_CATEGORY_ID} не найдена.")
@@ -421,10 +392,7 @@ async def on_ready():
         print(f"⚠️ Роль с ID {SUPPORT_ROLE_ID} не найдена.")
     if not bot.log_channel:
         print(f"⚠️ Лог-канал с ID {LOG_CHANNEL_ID} не найден.")
-    if not bot.admin_channel:
-        print(f"⚠️ Админ-канал с ID {ADMIN_CHANNEL_ID} не найден.")
 
-    # Запускаем фоновую задачу сброса логов
     asyncio.create_task(_flush_logs())
 
     try:
@@ -433,7 +401,7 @@ async def on_ready():
     except Exception as e:
         print(f"⚠️ Ошибка синхронизации команд: {e}")
 
-# ---------- Запуск бота и веб-сервера ----------
+# ---------- Запуск ----------
 async def main():
     asyncio.create_task(start_web_server())
     await bot.start(TOKEN)
