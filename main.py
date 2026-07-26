@@ -2,8 +2,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import os
-from dotenv import load_dotenv
 import sys
+import asyncio
+from dotenv import load_dotenv
+from aiohttp import web
 
 load_dotenv()
 
@@ -36,7 +38,6 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Список категорий (можете менять)
 CATEGORIES = [
     ("Общие вопросы", "general"),
     ("Вопросы по серверу", "server"),
@@ -76,13 +77,11 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
             await interaction.response.send_message("❌ Категория для тикетов не найдена.", ephemeral=True)
             return
 
-        # Проверка на уже существующий тикет
         existing = discord.utils.get(category.channels, topic=str(interaction.user.id))
         if existing:
             await interaction.response.send_message(f"⚠️ У вас уже есть открытый тикет: {existing.mention}", ephemeral=True)
             return
 
-        # Создаём канал
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
@@ -100,7 +99,6 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
             await interaction.response.send_message(f"❌ Ошибка создания канала: {e}", ephemeral=True)
             return
 
-        # Отправляем данные в канал
         embed = discord.Embed(title="Информация о тикете", color=discord.Color.blue())
         embed.add_field(name="Категория", value=self.category_name, inline=False)
         embed.add_field(name="SteamID64", value=self.steamid.value, inline=False)
@@ -109,13 +107,11 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         embed.set_footer(text=f"От: {interaction.user.display_name}")
         await channel.send(embed=embed)
 
-        # Кнопка закрытия
         close_btn = CloseTicketButton()
         view = discord.ui.View()
         view.add_item(close_btn)
         await channel.send("🔒 Для закрытия тикета нажмите кнопку ниже.", view=view)
 
-        # Логирование
         log_channel = guild.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             log_embed = discord.Embed(title="🆕 Новый тикет", color=discord.Color.gold())
@@ -140,7 +136,6 @@ class TicketCategoryButton(discord.ui.Button):
         self.category_name = category_name
 
     async def callback(self, interaction: discord.Interaction):
-        # Мгновенно открываем модальное окно (без создания канала)
         modal = TicketModal(category_name=self.category_name)
         await interaction.response.send_modal(modal)
 
@@ -201,7 +196,6 @@ async def ticket_setup(interaction: discord.Interaction):
 # ---------- Команда /close ----------
 @bot.tree.command(name="close", description="Закрыть текущий тикет")
 async def close_ticket(interaction: discord.Interaction):
-    # аналогично кнопке закрытия (можно вызвать тот же код, но для краткости оставлю как есть)
     channel = interaction.channel
     if not channel.category or channel.category.id != TICKET_CATEGORY_ID:
         await interaction.response.send_message("❌ Это не канал тикета.", ephemeral=True)
@@ -223,6 +217,21 @@ async def close_ticket(interaction: discord.Interaction):
         await log_channel.send(embed=log_embed)
     await channel.delete()
 
+# ---------- Веб-сервер для health check ----------
+async def health_check(request):
+    return web.Response(text="OK", status=200)
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host='0.0.0.0', port=8080)
+    await site.start()
+    print("🌐 Веб-сервер для health check запущен на порту 8080")
+    # Бесконечно держим сервер
+    await asyncio.Event().wait()
+
 # ---------- Событие готовности ----------
 @bot.event
 async def on_ready():
@@ -233,6 +242,12 @@ async def on_ready():
     except Exception as e:
         print(f"⚠️ Ошибка синхронизации: {e}")
 
-# ---------- Запуск ----------
+# ---------- Запуск бота и веб-сервера параллельно ----------
+async def main():
+    # Запускаем веб-сервер в фоне
+    asyncio.create_task(start_web_server())
+    # Запускаем бота
+    await bot.start(TOKEN)
+
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    asyncio.run(main())
