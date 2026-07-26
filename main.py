@@ -341,7 +341,7 @@ class TicketSetupView(discord.ui.View):
             ("❔ Общие вопросы", "Общие вопросы", discord.ButtonStyle.primary),
             ("📦 Восстановление имущества", "Восстановление имущества", discord.ButtonStyle.success),
             ("🛠️ Технические проблемы", "Технические проблемы", discord.ButtonStyle.secondary),
-            ("⚠️ Жалоба на игрока", "Жалоба на игрока", discord.ButtonStyle.danger),
+            ("⚠️ Жалоба на игрока/группировку", "Жалоба на игрока", discord.ButtonStyle.danger),
             ("🛡️ Жалоба на администрацию", "Жалоба на администрацию", discord.ButtonStyle.danger)
         ]
         for label, cat_name, style in categories:
@@ -352,7 +352,7 @@ class TicketSetupView(discord.ui.View):
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🎫 HS TICKET | Центр поддержки",
+        title="🎫 ECLIPSE TICKET | Центр поддержки",
         description=(
             "**Нужна помощь, восстановление или разбор ситуации?**\n"
             "Выберите подходящую тему кнопкой ниже, укажите свой **SteamID64** и кратко опишите обращение.\n\n"
