@@ -13,11 +13,25 @@ load_dotenv()
 # ---------- Конфигурация ----------
 TOKEN = os.getenv('DISCORD_TOKEN')
 TICKET_CATEGORY_ID = int(os.getenv('TICKET_CATEGORY_ID', 0))
-SUPPORT_ROLE_ID = int(os.getenv('SUPPORT_ROLE_ID', 0))
 LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
 
-if not all([TOKEN, TICKET_CATEGORY_ID, SUPPORT_ROLE_ID, LOG_CHANNEL_ID]):
+# Основная роль поддержки (для совместимости, можно не использовать)
+SUPPORT_ROLE_ID = int(os.getenv('SUPPORT_ROLE_ID', 0))
+
+# Дополнительные роли поддержки (указанные вами)
+ADDITIONAL_SUPPORT_ROLE_IDS = [
+    1529252048883810485,
+    1529253808666841302,
+    1529253952850366616,
+    1529254103820275823
+]
+
+# Все роли, имеющие доступ к тикетам
+ALL_SUPPORT_ROLE_IDS = [SUPPORT_ROLE_ID] + ADDITIONAL_SUPPORT_ROLE_IDS if SUPPORT_ROLE_ID else ADDITIONAL_SUPPORT_ROLE_IDS
+
+if not all([TOKEN, TICKET_CATEGORY_ID, LOG_CHANNEL_ID]):
     print("❌ Ошибка: не заданы все переменные окружения.")
+    print("Необходимы: DISCORD_TOKEN, TICKET_CATEGORY_ID, LOG_CHANNEL_ID")
     sys.exit(1)
 
 # ---------- Счётчик ----------
@@ -74,7 +88,6 @@ intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 bot.category = None
-bot.support_role = None
 bot.log_channel = None
 bot.ticket_open_time = {}
 
@@ -125,9 +138,19 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
 
         guild = interaction.guild
         category = bot.category
-        support_role = bot.support_role
-        if not category or not support_role:
-            await interaction.response.send_message("❌ Категория или роль не найдены.", ephemeral=True)
+        if not category:
+            await interaction.response.send_message("❌ Категория не найдена.", ephemeral=True)
+            return
+
+        # Проверяем существующие роли поддержки
+        support_roles = []
+        for role_id in ALL_SUPPORT_ROLE_IDS:
+            role = guild.get_role(role_id)
+            if role:
+                support_roles.append(role)
+
+        if not support_roles:
+            await interaction.response.send_message("❌ Ни одна из ролей поддержки не найдена.", ephemeral=True)
             return
 
         existing = discord.utils.get(category.channels, topic=str(interaction.user.id))
@@ -144,8 +167,10 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            support_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
         }
+        # Добавляем все роли поддержки с правами
+        for role in support_roles:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
         try:
             channel = await guild.create_text_channel(
@@ -160,7 +185,7 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
 
         bot.ticket_open_time[current_number] = datetime.now()
 
-        # --- Логируем открытие ---
+        # Логируем открытие
         await write_ticket_log(current_number, f"🟢 ТИКЕТ ОТКРЫТ")
         await write_ticket_log(current_number, f"   Пользователь: {interaction.user}")
         await write_ticket_log(current_number, f"   Категория: {self.category_name}")
@@ -168,23 +193,7 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         await write_ticket_log(current_number, f"   Ник: {self.nickname.value}")
         await write_ticket_log(current_number, f"   Проблема: {self.brief.value}")
 
-        # --- Отправляем игроку ЛС с приглашением описать подробнее ---
-        try:
-            embed_welcome = discord.Embed(
-                title=f"🎫 Тикет #{current_number:05d} создан",
-                description=(
-                    "**Теперь опишите подробнее ситуацию**\n"
-                    "Прикрепите доказательства, если они нужны (скриншоты, видео, логи).\n\n"
-                    "Общайтесь в созданном канале, администраторы скоро ответят."
-                ),
-                color=discord.Color.green()
-            )
-            embed_welcome.set_footer(text="Команда поддержки ECLIPSE RP")
-            await interaction.user.send(embed=embed_welcome)
-        except:
-            pass  # если пользователь запретил ЛС, просто игнорируем
-
-        # --- Embed в канал тикета ---
+        # --- 1) Основной embed с информацией о тикете ---
         embed = discord.Embed(title="Информация о тикете", color=discord.Color.blue())
         embed.add_field(name="Категория", value=self.category_name, inline=False)
         embed.add_field(name="SteamID64", value=steam, inline=False)
@@ -193,13 +202,26 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         embed.set_footer(text=f"От: {interaction.user.display_name}")
         await channel.send(embed=embed)
 
-        # --- Кнопки управления ---
+        # --- 2) Приветственное сообщение с просьбой описать подробнее (в канале, а не в ЛС) ---
+        welcome_embed = discord.Embed(
+            title=f"🎫 Тикет #{current_number:05d} создан",
+            description=(
+                "**Теперь опишите подробнее ситуацию**\n"
+                "Прикрепите доказательства, если они нужны (скриншоты, видео, логи).\n\n"
+                "Общайтесь в этом канале, администраторы скоро ответят."
+            ),
+            color=discord.Color.green()
+        )
+        welcome_embed.set_footer(text="Команда поддержки ECLIPSE RP")
+        await channel.send(embed=welcome_embed)
+
+        # --- 3) Кнопки управления ---
         view = discord.ui.View()
         view.add_item(CloseTicketButton())
         view.add_item(CloseWithReasonButton())
         await channel.send("🔒 Кнопки управления:", view=view)
 
-        # --- Уведомление в лог-канал ---
+        # Уведомление в лог-канал
         log_channel = bot.log_channel
         if log_channel:
             log_embed = discord.Embed(title="🆕 Новый тикет", color=discord.Color.gold())
@@ -235,7 +257,14 @@ class CloseTicketButton(discord.ui.Button):
             return
         creator_id = int(creator_id)
 
-        if interaction.user.id != creator_id and not interaction.user.get_role(SUPPORT_ROLE_ID):
+        # Проверяем, есть ли у пользователя одна из ролей поддержки
+        has_support_role = False
+        for role_id in ALL_SUPPORT_ROLE_IDS:
+            if interaction.user.get_role(role_id):
+                has_support_role = True
+                break
+
+        if interaction.user.id != creator_id and not has_support_role:
             await interaction.response.send_message("⛔ У вас нет прав.", ephemeral=True)
             return
 
@@ -249,13 +278,13 @@ class CloseTicketButton(discord.ui.Button):
         if ticket_number:
             status = "ПРОВЕРЕН" if verified else "ЗАКРЫТ"
 
-            # --- Логируем закрытие ---
+            # Логируем закрытие
             await write_ticket_log(ticket_number, f"🔴 ТИКЕТ {status}")
             await write_ticket_log(ticket_number, f"   Закрыл: {interaction.user}")
             if reason:
                 await write_ticket_log(ticket_number, f"   Причина: {reason}")
 
-            # --- Собираем краткий лог переписки (без ботов) ---
+            # Собираем краткий лог переписки (без ботов)
             log_lines = []
             try:
                 async for msg in channel.history(limit=100, oldest_first=True):
@@ -265,7 +294,7 @@ class CloseTicketButton(discord.ui.Button):
             except:
                 log_text = "Не удалось прочитать историю."
 
-            # --- Отправляем ЛС создателю с кратким логом и причиной ---
+            # Отправляем ЛС создателю с кратким логом и причиной
             try:
                 creator = await interaction.guild.fetch_member(creator_id)
                 if creator:
@@ -286,7 +315,7 @@ class CloseTicketButton(discord.ui.Button):
             except Exception as e:
                 print(f"⚠️ Не удалось отправить ЛС: {e}")
 
-            # --- Отправляем полный лог-файл в лог-канал ---
+            # Отправляем полный лог-файл в лог-канал
             log_channel = bot.log_channel
             if log_channel:
                 log_content = await read_ticket_log(ticket_number)
@@ -317,7 +346,13 @@ class CloseWithReasonButton(discord.ui.Button):
         super().__init__(label="Закрыть с причиной", style=discord.ButtonStyle.secondary, custom_id="close_with_reason")
 
     async def callback(self, interaction: discord.Interaction):
-        if not interaction.user.get_role(SUPPORT_ROLE_ID):
+        # Проверка на роль поддержки (любую из списка)
+        has_support_role = False
+        for role_id in ALL_SUPPORT_ROLE_IDS:
+            if interaction.user.get_role(role_id):
+                has_support_role = True
+                break
+        if not has_support_role:
             await interaction.response.send_message("⛔ Только для поддержки.", ephemeral=True)
             return
         modal = CloseReasonModal()
@@ -341,7 +376,7 @@ class TicketSetupView(discord.ui.View):
             ("❔ Общие вопросы", "Общие вопросы", discord.ButtonStyle.primary),
             ("📦 Восстановление имущества", "Восстановление имущества", discord.ButtonStyle.success),
             ("🛠️ Технические проблемы", "Технические проблемы", discord.ButtonStyle.secondary),
-            ("⚠️ Жалоба на игрока/группировку", "Жалоба на игрока", discord.ButtonStyle.danger),
+            ("⚠️ Жалоба на игрока", "Жалоба на игрока", discord.ButtonStyle.danger),
             ("🛡️ Жалоба на администрацию", "Жалоба на администрацию", discord.ButtonStyle.danger)
         ]
         for label, cat_name, style in categories:
@@ -352,7 +387,7 @@ class TicketSetupView(discord.ui.View):
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🎫 ECLIPSE TICKET | Центр поддержки",
+        title="🎫 HS TICKET | Центр поддержки",
         description=(
             "**Нужна помощь, восстановление или разбор ситуации?**\n"
             "Выберите подходящую тему кнопкой ниже, укажите свой **SteamID64** и кратко опишите обращение.\n\n"
@@ -422,10 +457,17 @@ async def on_ready():
         print("⚠️ Бот не на сервере.")
         return
     bot.category = guild.get_channel(TICKET_CATEGORY_ID)
-    bot.support_role = guild.get_role(SUPPORT_ROLE_ID)
     bot.log_channel = guild.get_channel(LOG_CHANNEL_ID)
+
+    # Проверяем роли
+    for role_id in ALL_SUPPORT_ROLE_IDS:
+        role = guild.get_role(role_id)
+        if role:
+            print(f"✅ Роль {role.name} (ID: {role_id}) найдена.")
+        else:
+            print(f"⚠️ Роль с ID {role_id} не найдена.")
+
     if not bot.category: print(f"⚠️ Категория {TICKET_CATEGORY_ID} не найдена.")
-    if not bot.support_role: print(f"⚠️ Роль {SUPPORT_ROLE_ID} не найдена.")
     if not bot.log_channel: print(f"⚠️ Лог-канал {LOG_CHANNEL_ID} не найден.")
     try:
         synced = await bot.tree.sync()
