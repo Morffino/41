@@ -33,6 +33,28 @@ except ValueError:
     print("❌ Ошибка: ID должны быть числами.")
     sys.exit(1)
 
+# ---------- Счётчик тикетов ----------
+COUNTER_FILE = "data/ticket_counter.txt"
+ticket_counter = 0
+counter_lock = asyncio.Lock()
+
+def load_counter():
+    global ticket_counter
+    if not os.path.exists(COUNTER_FILE):
+        ticket_counter = 1
+        return
+    try:
+        with open(COUNTER_FILE, "r") as f:
+            ticket_counter = int(f.read().strip())
+    except:
+        ticket_counter = 1
+
+def save_counter():
+    os.makedirs(os.path.dirname(COUNTER_FILE), exist_ok=True)
+    with open(COUNTER_FILE, "w") as f:
+        f.write(str(ticket_counter))
+
+# ---------- Бот ----------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -71,34 +93,51 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         self.category_name = category_name
 
     async def on_submit(self, interaction: discord.Interaction):
+        global ticket_counter
         guild = interaction.guild
         category = discord.utils.get(guild.categories, id=TICKET_CATEGORY_ID)
         if not category:
             await interaction.response.send_message("❌ Категория для тикетов не найдена.", ephemeral=True)
             return
 
+        # Проверка на уже существующий тикет по пользователю
         existing = discord.utils.get(category.channels, topic=str(interaction.user.id))
         if existing:
             await interaction.response.send_message(f"⚠️ У вас уже есть открытый тикет: {existing.mention}", ephemeral=True)
             return
 
+        # Получаем следующий номер тикета (с блокировкой)
+        async with counter_lock:
+            current_number = ticket_counter
+            ticket_counter += 1
+            save_counter()
+
+        # Формируем имя канала: ticket-001, ticket-002, ... ticket-100000
+        channel_name = f"ticket-{current_number:05d}"  # 5 цифр с ведущими нулями
+
+        # Права доступа
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
             guild.get_role(SUPPORT_ROLE_ID): discord.PermissionOverwrite(view_channel=True, send_messages=True)
         }
-        channel_name = f"ticket-{interaction.user.name.lower()}"
+
         try:
             channel = await guild.create_text_channel(
                 name=channel_name,
                 category=category,
                 overwrites=overwrites,
-                topic=str(interaction.user.id)
+                topic=str(interaction.user.id)  # сохраняем создателя
             )
         except Exception as e:
             await interaction.response.send_message(f"❌ Ошибка создания канала: {e}", ephemeral=True)
+            # Откатываем счётчик, чтобы номер не потерялся
+            async with counter_lock:
+                ticket_counter = current_number
+                save_counter()
             return
 
+        # Отправляем данные в канал
         embed = discord.Embed(title="Информация о тикете", color=discord.Color.blue())
         embed.add_field(name="Категория", value=self.category_name, inline=False)
         embed.add_field(name="SteamID64", value=self.steamid.value, inline=False)
@@ -107,14 +146,17 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         embed.set_footer(text=f"От: {interaction.user.display_name}")
         await channel.send(embed=embed)
 
+        # Кнопка закрытия
         close_btn = CloseTicketButton()
         view = discord.ui.View()
         view.add_item(close_btn)
         await channel.send("🔒 Для закрытия тикета нажмите кнопку ниже.", view=view)
 
+        # Логирование
         log_channel = guild.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             log_embed = discord.Embed(title="🆕 Новый тикет", color=discord.Color.gold())
+            log_embed.add_field(name="Номер", value=f"#{current_number:05d}", inline=False)
             log_embed.add_field(name="Пользователь", value=interaction.user.mention, inline=False)
             log_embed.add_field(name="Канал", value=channel.mention, inline=False)
             log_embed.add_field(name="Категория", value=self.category_name, inline=False)
@@ -229,13 +271,13 @@ async def start_web_server():
     site = web.TCPSite(runner, host='0.0.0.0', port=8080)
     await site.start()
     print("🌐 Веб-сервер для health check запущен на порту 8080")
-    # Бесконечно держим сервер
     await asyncio.Event().wait()
 
 # ---------- Событие готовности ----------
 @bot.event
 async def on_ready():
-    print(f'✅ Бот {bot.user} запущен!')
+    load_counter()
+    print(f'✅ Бот {bot.user} запущен! Текущий счётчик тикетов: {ticket_counter}')
     try:
         synced = await bot.tree.sync()
         print(f"🔄 Синхронизировано {len(synced)} команд.")
@@ -244,9 +286,7 @@ async def on_ready():
 
 # ---------- Запуск бота и веб-сервера параллельно ----------
 async def main():
-    # Запускаем веб-сервер в фоне
     asyncio.create_task(start_web_server())
-    # Запускаем бота
     await bot.start(TOKEN)
 
 if __name__ == "__main__":
