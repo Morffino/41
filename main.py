@@ -15,7 +15,7 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 TICKET_CATEGORY_ID = int(os.getenv('TICKET_CATEGORY_ID', 0))
 LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
 
-# Основная роль поддержки (для совместимости, можно не использовать)
+# Можно оставить SUPPORT_ROLE_ID для обратной совместимости, но мы используем список
 SUPPORT_ROLE_ID = int(os.getenv('SUPPORT_ROLE_ID', 0))
 
 # Дополнительные роли поддержки (указанные вами)
@@ -168,7 +168,6 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
         }
-        # Добавляем все роли поддержки с правами
         for role in support_roles:
             overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
@@ -202,7 +201,7 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         embed.set_footer(text=f"От: {interaction.user.display_name}")
         await channel.send(embed=embed)
 
-        # --- 2) Приветственное сообщение с просьбой описать подробнее (в канале, а не в ЛС) ---
+        # --- 2) Приветственное сообщение ---
         welcome_embed = discord.Embed(
             title=f"🎫 Тикет #{current_number:05d} создан",
             description=(
@@ -284,17 +283,22 @@ class CloseTicketButton(discord.ui.Button):
             if reason:
                 await write_ticket_log(ticket_number, f"   Причина: {reason}")
 
-            # Собираем краткий лог переписки (без ботов)
+            # --- Собираем лог переписки (без ботов) в виде строки ---
             log_lines = []
             try:
-                async for msg in channel.history(limit=100, oldest_first=True):
+                async for msg in channel.history(limit=200, oldest_first=True):
                     if not msg.author.bot:
-                        log_lines.append(f"**{msg.author.display_name}**: {msg.content}")
+                        log_lines.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M:%S')}] {msg.author.display_name}: {msg.content}")
                 log_text = "\n".join(log_lines) if log_lines else "Нет сообщений."
             except:
                 log_text = "Не удалось прочитать историю."
 
-            # Отправляем ЛС создателю с кратким логом и причиной
+            # Создаем временный файл с логом переписки
+            temp_log_path = f"/tmp/chat_log_{ticket_number:05d}.txt"
+            with open(temp_log_path, "w", encoding="utf-8") as f:
+                f.write(log_text)
+
+            # Отправляем ЛС создателю: embed с информацией + файл лога
             try:
                 creator = await interaction.guild.fetch_member(creator_id)
                 if creator:
@@ -309,13 +313,17 @@ class CloseTicketButton(discord.ui.Button):
                     embed.add_field(name="Тикет открыт", value=open_time.strftime("%d %B %Y г. %H:%M"), inline=False)
                     embed.add_field(name="Тикет закрыт", value=close_time.strftime("%d %B %Y г. %H:%M"), inline=False)
                     embed.add_field(name="Причина закрытия", value=reason if reason else "Не указана", inline=False)
-                    embed.add_field(name="📜 Краткий лог переписки", value=log_text[:1024], inline=False)
                     embed.set_footer(text=close_time.strftime("%d.%m.%Y %H:%M"))
-                    await creator.send(embed=embed)
+                    # Отправляем embed и файл
+                    await creator.send(embed=embed, file=discord.File(temp_log_path, filename=f"chat_log_{ticket_number:05d}.txt"))
             except Exception as e:
                 print(f"⚠️ Не удалось отправить ЛС: {e}")
 
-            # Отправляем полный лог-файл в лог-канал
+            # Удаляем временный файл
+            if os.path.exists(temp_log_path):
+                os.remove(temp_log_path)
+
+            # Отправляем полный лог-файл (с системными сообщениями) в лог-канал
             log_channel = bot.log_channel
             if log_channel:
                 log_content = await read_ticket_log(ticket_number)
@@ -346,7 +354,6 @@ class CloseWithReasonButton(discord.ui.Button):
         super().__init__(label="Закрыть с причиной", style=discord.ButtonStyle.secondary, custom_id="close_with_reason")
 
     async def callback(self, interaction: discord.Interaction):
-        # Проверка на роль поддержки (любую из списка)
         has_support_role = False
         for role_id in ALL_SUPPORT_ROLE_IDS:
             if interaction.user.get_role(role_id):
@@ -459,7 +466,6 @@ async def on_ready():
     bot.category = guild.get_channel(TICKET_CATEGORY_ID)
     bot.log_channel = guild.get_channel(LOG_CHANNEL_ID)
 
-    # Проверяем роли
     for role_id in ALL_SUPPORT_ROLE_IDS:
         role = guild.get_role(role_id)
         if role:
