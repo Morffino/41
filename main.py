@@ -4,11 +4,13 @@ from discord.ext import commands
 import os
 import sys
 import asyncio
+from datetime import datetime
 from dotenv import load_dotenv
 from aiohttp import web
 
-# Импорт нашего логгера
+# Импорт наших модулей
 from logger import log_open, log_message, log_close, get_log_content, delete_log
+from notifications import send_close_notification
 
 load_dotenv()
 
@@ -49,6 +51,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 bot.category = None
 bot.support_role = None
 bot.log_channel = None
+bot.ticket_open_time = {}  # {номер_тикета: datetime}
 
 # ---------- Модальное окно ----------
 class TicketModal(discord.ui.Modal, title='Создание тикета'):
@@ -116,7 +119,8 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
             await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
             return
 
-        # --- Логируем открытие ---
+        bot.ticket_open_time[current_number] = datetime.now()
+
         await log_open(
             current_number,
             str(interaction.user),
@@ -178,7 +182,6 @@ class CloseTicketButton(discord.ui.Button):
             await interaction.response.send_message("⛔ У вас нет прав.", ephemeral=True)
             return
 
-        # Получаем номер тикета
         try:
             ticket_number = int(channel.name.split('-')[1])
         except:
@@ -186,12 +189,21 @@ class CloseTicketButton(discord.ui.Button):
 
         await interaction.response.send_message("⏳ Тикет закрывается...", ephemeral=True)
 
-        # --- Логируем закрытие ---
         if ticket_number:
             status = "ПРОВЕРЕН" if verified else "ЗАКРЫТ"
             await log_close(ticket_number, str(interaction.user), verified)
 
-            # Отправляем лог-файл в лог-канал
+            # --- Отправляем ЛС создателю (используем отдельную функцию) ---
+            try:
+                creator = await interaction.guild.fetch_member(creator_id)
+                if creator:
+                    open_time = bot.ticket_open_time.get(ticket_number, datetime.now())
+                    close_time = datetime.now()
+                    await send_close_notification(creator, ticket_number, open_time, close_time, verified, interaction.user)
+            except Exception as e:
+                print(f"⚠️ Ошибка при отправке ЛС: {e}")
+
+            # --- Отправляем лог-файл в лог-канал ---
             log_channel = bot.log_channel
             if log_channel:
                 log_content = await get_log_content(ticket_number)
@@ -209,10 +221,11 @@ class CloseTicketButton(discord.ui.Button):
                     os.remove(temp_path)
                 else:
                     await log_channel.send(f"📄 Лог тикета #{ticket_number:05d} пуст.")
-            # Удаляем локальный лог-файл
             await delete_log(ticket_number)
 
-        # Удаляем канал
+            if ticket_number in bot.ticket_open_time:
+                del bot.ticket_open_time[ticket_number]
+
         await channel.delete()
 
 # ---------- Кнопки категорий ----------
@@ -225,7 +238,7 @@ class TicketCategoryButton(discord.ui.Button):
         modal = TicketModal(category_name=self.category_name)
         await interaction.response.send_modal(modal)
 
-# ---------- Представление с кнопками ----------
+# ---------- Представление ----------
 class TicketSetupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -266,20 +279,17 @@ async def close_ticket(interaction: discord.Interaction):
     close_btn = CloseTicketButton()
     await close_btn._close(interaction, verified=False)
 
-# ---------- Обработчик сообщений для логирования ----------
+# ---------- Обработчик сообщений ----------
 @bot.event
 async def on_message(message):
-    # Игнорируем сообщения от бота
     if message.author.bot:
         await bot.process_commands(message)
         return
 
-    # Проверяем, что канал находится в категории тикетов
     if not message.channel.category or message.channel.category.id != TICKET_CATEGORY_ID:
         await bot.process_commands(message)
         return
 
-    # Извлекаем номер тикета из имени канала
     channel_name = message.channel.name
     if not channel_name.startswith("ticket-"):
         await bot.process_commands(message)
@@ -291,10 +301,7 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
-    # Записываем сообщение в лог (без лишних проверок)
     await log_message(ticket_number, str(message.author), message.content)
-
-    # Обязательно передаём команды дальше
     await bot.process_commands(message)
 
 # ---------- Веб-сервер ----------
