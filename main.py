@@ -40,7 +40,6 @@ def save_counter():
 
 # ---------- Логирование (исправлено) ----------
 LOG_DIR = "logs"
-# Если есть файл logs, удаляем его, чтобы создать папку
 if os.path.exists(LOG_DIR) and not os.path.isdir(LOG_DIR):
     os.remove(LOG_DIR)
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -79,7 +78,21 @@ bot.support_role = None
 bot.log_channel = None
 bot.ticket_open_time = {}
 
-# ---------- Модальное окно ----------
+# ---------- Модальное окно для причины закрытия ----------
+class CloseReasonModal(discord.ui.Modal, title='Укажите причину закрытия'):
+    reason = discord.ui.TextInput(
+        label='Причина закрытия',
+        placeholder='Опишите причину...',
+        required=True,
+        max_length=200
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        reason = self.reason.value
+        close_btn = CloseTicketButton()
+        await close_btn._close(interaction, verified=False, reason=reason)
+
+# ---------- Модальное окно создания тикета ----------
 class TicketModal(discord.ui.Modal, title='Создание тикета'):
     steamid = discord.ui.TextInput(
         label='SteamID64',
@@ -163,10 +176,11 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         embed.set_footer(text=f"От: {interaction.user.display_name}")
         await channel.send(embed=embed)
 
-        close_btn = CloseTicketButton()
+        # --- Кнопки управления тикетом ---
         view = discord.ui.View()
-        view.add_item(close_btn)
-        await channel.send("🔒 Для закрытия нажмите кнопку.", view=view)
+        view.add_item(CloseTicketButton())          # простая кнопка
+        view.add_item(CloseWithReasonButton())      # новая кнопка для админов
+        await channel.send("🔒 Кнопки управления:", view=view)
 
         log_channel = bot.log_channel
         if log_channel:
@@ -183,7 +197,7 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         await interaction.response.send_message("❌ Ошибка.", ephemeral=True)
         print(error)
 
-# ---------- Кнопка закрытия ----------
+# ---------- Кнопка закрытия (простая) ----------
 class CloseTicketButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="Закрыть тикет", style=discord.ButtonStyle.danger, custom_id="close_ticket")
@@ -191,7 +205,7 @@ class CloseTicketButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await self._close(interaction, verified=False)
 
-    async def _close(self, interaction: discord.Interaction, verified: bool):
+    async def _close(self, interaction: discord.Interaction, verified: bool, reason: str = None):
         channel = interaction.channel
         if not channel.category or channel.category.id != TICKET_CATEGORY_ID:
             await interaction.response.send_message("❌ Это не канал тикета.", ephemeral=True)
@@ -219,14 +233,15 @@ class CloseTicketButton(discord.ui.Button):
             # Логируем закрытие
             await write_ticket_log(ticket_number, f"🔴 ТИКЕТ {status}")
             await write_ticket_log(ticket_number, f"   Закрыл: {interaction.user}")
+            if reason:
+                await write_ticket_log(ticket_number, f"   Причина: {reason}")
 
-            # Уведомление в ЛС создателю
+            # Отправляем уведомление в ЛС создателю
             try:
                 creator = await interaction.guild.fetch_member(creator_id)
                 if creator:
                     open_time = bot.ticket_open_time.get(ticket_number, datetime.now())
                     close_time = datetime.now()
-                    reason = "Вопрос решен" if verified else "Тикет закрыт"
                     embed = discord.Embed(
                         title=f"# Тикет #{ticket_number:05d} закрыт",
                         color=discord.Color.green() if verified else discord.Color.orange()
@@ -235,7 +250,10 @@ class CloseTicketButton(discord.ui.Button):
                     embed.add_field(name="Закрыл тикет", value=interaction.user.mention, inline=False)
                     embed.add_field(name="Тикет открыт", value=open_time.strftime("%d %B %Y г. %H:%M"), inline=False)
                     embed.add_field(name="Тикет закрыт", value=close_time.strftime("%d %B %Y г. %H:%M"), inline=False)
-                    embed.add_field(name="Причина закрытия", value=reason, inline=False)
+                    if reason:
+                        embed.add_field(name="Причина закрытия", value=reason, inline=False)
+                    else:
+                        embed.add_field(name="Причина закрытия", value="Не указана", inline=False)
                     embed.set_footer(text=close_time.strftime("%d.%m.%Y %H:%M"))
                     await creator.send(embed=embed)
             except Exception as e:
@@ -265,6 +283,18 @@ class CloseTicketButton(discord.ui.Button):
                 del bot.ticket_open_time[ticket_number]
 
         await channel.delete()
+
+# ---------- Кнопка закрытия с причиной (только для поддержки) ----------
+class CloseWithReasonButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Закрыть с причиной", style=discord.ButtonStyle.secondary, custom_id="close_with_reason")
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.user.get_role(SUPPORT_ROLE_ID):
+            await interaction.response.send_message("⛔ Только для поддержки.", ephemeral=True)
+            return
+        modal = CloseReasonModal()
+        await interaction.response.send_modal(modal)
 
 # ---------- Кнопки категорий ----------
 class TicketCategoryButton(discord.ui.Button):
