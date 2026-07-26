@@ -218,12 +218,12 @@ ticket_setup_view = TicketSetupView()
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="HS TICKET | Центр поддержки",
+        title="ECLIPSE TICKET | Группа поддержки",
         description=(
-            "Нужна помощь, восстановление. Выбери подходящую тему кнопки обращения.\n\n"
-            "**Важно:** создавайте текст только увидит нужная команда."
+            "Окажем помощь, восстановим вещи. Выбери подходящую тему и нажми кнопку обращения.\n\n"
+            "**Важно:** выберите нужную тему, и только потом нажмите на кнопку."
         ),
-        color=discord.Color.blue()
+        color=discord.Color.red()
     )
     await interaction.response.send_message(embed=embed, view=ticket_setup_view)
 
