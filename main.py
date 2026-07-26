@@ -19,7 +19,7 @@ if not all([TOKEN, TICKET_CATEGORY_ID, SUPPORT_ROLE_ID, LOG_CHANNEL_ID]):
     print("❌ Ошибка: не заданы все переменные окружения.")
     sys.exit(1)
 
-# ---------- Счётчик тикетов ----------
+# ---------- Счётчик ----------
 COUNTER_FILE = "data/ticket_counter.txt"
 ticket_counter = 1
 counter_lock = asyncio.Lock()
@@ -173,39 +173,49 @@ class CloseTicketButton(discord.ui.Button):
 
         await channel.delete()
 
-# ---------- Кнопки категорий (с изменёнными названиями) ----------
+# ---------- Кнопки категорий (с разными цветами) ----------
 class TicketCategoryButton(discord.ui.Button):
-    def __init__(self, label: str, category_name: str):
-        super().__init__(label=label, style=discord.ButtonStyle.primary, custom_id=f"ticket_{category_name}")
+    def __init__(self, label: str, category_name: str, style: discord.ButtonStyle):
+        super().__init__(label=label, style=style, custom_id=f"ticket_{category_name}")
         self.category_name = category_name
 
     async def callback(self, interaction: discord.Interaction):
         modal = TicketModal(category_name=self.category_name)
         await interaction.response.send_modal(modal)
 
-# ---------- Представление с кнопками (обновлённый список) ----------
+# ---------- Представление с настраиваемыми кнопками ----------
 class TicketSetupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        # Новые названия с эмодзи (как в ваших последних правках)
+        # Формат: (текст на кнопке, внутреннее имя категории, стиль кнопки)
         categories = [
-            ("❔ Общие вопросы", "Общие вопросы"),
-            ("📦 Восстановление имущества", "Восстановление имущества"),
-            ("🛠️ Технические проблемы", "Технические проблемы"),
-            ("⚠️ Жалоба на игрока / группировку", "Жалоба на игрока / группировку"),
-            ("🛡️ Жалоба на Администрацию", "Жалоба на Администрацию")
+            ("❔ Общие вопросы", "Общие вопросы", discord.ButtonStyle.primary),
+            ("📦 Восстановление имущества", "Восстановление имущества", discord.ButtonStyle.success),
+            ("🛠️ Технические проблемы", "Технические проблемы", discord.ButtonStyle.secondary),
+            ("⚠️ Жалоба на игрока", "Жалоба на игрока", discord.ButtonStyle.danger),
+            ("🛡️ Жалоба на администрацию", "Жалоба на администрацию", discord.ButtonStyle.danger)
         ]
-        for label, cat_name in categories:
-            self.add_item(TicketCategoryButton(label=label, category_name=cat_name))
+        for label, cat_name, style in categories:
+            self.add_item(TicketCategoryButton(label=label, category_name=cat_name, style=style))
 
-# ---------- Команда /ticket_setup ----------
+# ---------- Команда /ticket_setup (с обновлённым embed) ----------
 @bot.tree.command(name="ticket_setup", description="Создать сообщение с кнопками")
 @app_commands.default_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="HS TICKET | Центр поддержки",
-        description="Нужна помощь? Выберите тему кнопкой ниже.",
-        color=discord.Color.blue()
+        title="🎫 HS TICKET | Центр поддержки",
+        description=(
+            "**Нужна помощь, восстановление или разбор ситуации?**\n"
+            "Выберите подходящую тему кнопкой ниже, укажите свой **SteamID64** и кратко опишите обращение.\n\n"
+            "> ⚠️ **Важно:** создавайте тикет только в подходящей категории — так его быстрее увидит нужная команда.\n\n"
+            "❔ **Общие вопросы** — Вопросы по серверам, правилам, донату.\n"
+            "📦 **Восстановление имущества** — Потеря вещей из‑за багов, откаты базы, кражи через уязвимости.\n"
+            "🛠️ **Технические проблемы** — Ошибки подключения, вылеты, зависания.\n"
+            "⚠️ **Жалоба на игрока** — Нарушения правил, конфликты, доказательства.\n"
+            "🛡️ **Жалоба на администрацию** — Действия или бездействие администраторов, спорные решения.\n\n"
+            "*С уважением, команда ECLIPSE RP*"
+        ),
+        color=discord.Color.red()
     )
     view = TicketSetupView()
     await interaction.response.send_message(embed=embed, view=view)
@@ -234,7 +244,7 @@ async def close_ticket(interaction: discord.Interaction):
         await log_channel.send(embed=log_embed)
     await channel.delete()
 
-# ---------- Веб-сервер (health check) ----------
+# ---------- Веб-сервер ----------
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
@@ -248,7 +258,6 @@ async def start_web():
     print("🌐 Health check на порту 8080")
     await asyncio.Event().wait()
 
-# ---------- Событие готовности ----------
 @bot.event
 async def on_ready():
     load_counter()
