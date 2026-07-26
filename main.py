@@ -3,20 +3,50 @@ from discord import app_commands
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
+import sys
 
+# Загружаем переменные из .env (если есть)
 load_dotenv()
 
-# ---------- Конфигурация из .env ----------
-class Config:
-    TICKET_CATEGORY_ID = int(os.getenv('TICKET_CATEGORY_ID', 0))
-    SUPPORT_ROLE_ID = int(os.getenv('SUPPORT_ROLE_ID', 0))
-    LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
-    TOKEN = os.getenv('DISCORD_TOKEN')
+# ---------- Конфигурация из переменных окружения ----------
+TOKEN = os.getenv('DISCORD_TOKEN')
+TICKET_CATEGORY_ID = os.getenv('TICKET_CATEGORY_ID')
+SUPPORT_ROLE_ID = os.getenv('SUPPORT_ROLE_ID')
+LOG_CHANNEL_ID = os.getenv('LOG_CHANNEL_ID')
 
-if not all([Config.TOKEN, Config.TICKET_CATEGORY_ID, Config.SUPPORT_ROLE_ID, Config.LOG_CHANNEL_ID]):
-    raise ValueError("Не все переменные окружения заданы! Проверьте .env файл.")
+# Проверяем, что все переменные заданы
+missing = []
+if not TOKEN:
+    missing.append('DISCORD_TOKEN')
+if not TICKET_CATEGORY_ID:
+    missing.append('TICKET_CATEGORY_ID')
+if not SUPPORT_ROLE_ID:
+    missing.append('SUPPORT_ROLE_ID')
+if not LOG_CHANNEL_ID:
+    missing.append('LOG_CHANNEL_ID')
 
-# ---------- Бот ----------
+if missing:
+    print("❌ Ошибка: не заданы обязательные переменные окружения:")
+    for var in missing:
+        print(f"   - {var}")
+    print("\nУстановите их через панель управления хостингом или в файле .env")
+    print("Пример содержимого .env:")
+    print("DISCORD_TOKEN=ваш_токен")
+    print("TICKET_CATEGORY_ID=123456789")
+    print("SUPPORT_ROLE_ID=987654321")
+    print("LOG_CHANNEL_ID=111222333")
+    sys.exit(1)
+
+# Преобразуем ID в числа
+try:
+    TICKET_CATEGORY_ID = int(TICKET_CATEGORY_ID)
+    SUPPORT_ROLE_ID = int(SUPPORT_ROLE_ID)
+    LOG_CHANNEL_ID = int(LOG_CHANNEL_ID)
+except ValueError:
+    print("❌ Ошибка: ID должны быть числами. Проверьте переменные TICKET_CATEGORY_ID, SUPPORT_ROLE_ID, LOG_CHANNEL_ID.")
+    sys.exit(1)
+
+# ---------- Инициализация бота ----------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -74,7 +104,7 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
         await self.channel.send(embed=embed)
 
         # Логирование в лог-канал
-        log_channel = interaction.guild.get_channel(Config.LOG_CHANNEL_ID)
+        log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             log_embed = discord.Embed(title="🆕 Новый тикет", color=discord.Color.gold())
             log_embed.add_field(name="Пользователь", value=interaction.user.mention, inline=False)
@@ -84,6 +114,8 @@ class TicketModal(discord.ui.Modal, title='Создание тикета'):
             log_embed.add_field(name="Ник", value=self.nickname.value, inline=False)
             log_embed.add_field(name="Проблема", value=self.brief.value, inline=False)
             await log_channel.send(embed=log_embed)
+        else:
+            print(f"⚠️ Лог-канал с ID {LOG_CHANNEL_ID} не найден.")
 
         # Кнопка закрытия тикета
         close_btn = CloseTicketButton()
@@ -105,9 +137,9 @@ class TicketCategoryButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         guild = interaction.guild
-        category = discord.utils.get(guild.categories, id=Config.TICKET_CATEGORY_ID)
+        category = discord.utils.get(guild.categories, id=TICKET_CATEGORY_ID)
         if not category:
-            await interaction.response.send_message("❌ Категория для тикетов не настроена.", ephemeral=True)
+            await interaction.response.send_message("❌ Категория для тикетов не настроена. Обратитесь к администратору.", ephemeral=True)
             return
 
         # Проверка на уже открытый тикет у пользователя
@@ -120,7 +152,7 @@ class TicketCategoryButton(discord.ui.Button):
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            guild.get_role(Config.SUPPORT_ROLE_ID): discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            guild.get_role(SUPPORT_ROLE_ID): discord.PermissionOverwrite(view_channel=True, send_messages=True)
         }
         channel_name = f"ticket-{interaction.user.name.lower()}"
         try:
@@ -153,7 +185,7 @@ class CloseTicketButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         channel = interaction.channel
-        if not channel.category or channel.category.id != Config.TICKET_CATEGORY_ID:
+        if not channel.category or channel.category.id != TICKET_CATEGORY_ID:
             await interaction.response.send_message("❌ Это не канал тикета.", ephemeral=True)
             return
 
@@ -164,14 +196,14 @@ class CloseTicketButton(discord.ui.Button):
         creator_id = int(creator_id)
 
         # Права: создатель или роль поддержки
-        if interaction.user.id != creator_id and not interaction.user.get_role(Config.SUPPORT_ROLE_ID):
+        if interaction.user.id != creator_id and not interaction.user.get_role(SUPPORT_ROLE_ID):
             await interaction.response.send_message("⛔ У вас нет прав на закрытие этого тикета.", ephemeral=True)
             return
 
         await interaction.response.send_message("⏳ Тикет закрывается...", ephemeral=True)
 
         # Логирование
-        log_channel = interaction.guild.get_channel(Config.LOG_CHANNEL_ID)
+        log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             log_embed = discord.Embed(title="🔒 Тикет закрыт", color=discord.Color.red())
             log_embed.add_field(name="Канал", value=channel.name, inline=False)
@@ -206,7 +238,7 @@ async def ticket_setup(interaction: discord.Interaction):
 @bot.tree.command(name="close", description="Закрыть текущий тикет")
 async def close_ticket(interaction: discord.Interaction):
     channel = interaction.channel
-    if not channel.category or channel.category.id != Config.TICKET_CATEGORY_ID:
+    if not channel.category or channel.category.id != TICKET_CATEGORY_ID:
         await interaction.response.send_message("❌ Это не канал тикета.", ephemeral=True)
         return
 
@@ -216,13 +248,13 @@ async def close_ticket(interaction: discord.Interaction):
         return
     creator_id = int(creator_id)
 
-    if interaction.user.id != creator_id and not interaction.user.get_role(Config.SUPPORT_ROLE_ID):
+    if interaction.user.id != creator_id and not interaction.user.get_role(SUPPORT_ROLE_ID):
         await interaction.response.send_message("⛔ У вас нет прав на закрытие этого тикета.", ephemeral=True)
         return
 
     await interaction.response.send_message("⏳ Тикет закрывается...", ephemeral=True)
 
-    log_channel = interaction.guild.get_channel(Config.LOG_CHANNEL_ID)
+    log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
     if log_channel:
         log_embed = discord.Embed(title="🔒 Тикет закрыт", color=discord.Color.red())
         log_embed.add_field(name="Канал", value=channel.name, inline=False)
@@ -239,8 +271,8 @@ async def on_ready():
         synced = await bot.tree.sync()
         print(f"🔄 Синхронизировано {len(synced)} команд.")
     except Exception as e:
-        print(e)
+        print(f"⚠️ Ошибка синхронизации команд: {e}")
 
 # ---------- Запуск ----------
 if __name__ == "__main__":
-    bot.run(Config.TOKEN)
+    bot.run(TOKEN)
