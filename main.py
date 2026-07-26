@@ -78,7 +78,6 @@ bot.log_channel = None
 # Формат: (название, идентификатор, эмодзи, цвет кнопки)
 CATEGORIES = [
     ("Общие вопросы", "general", "❓", discord.ButtonStyle.primary),
-    ("Вопросы по серверу", "server", "🖥️", discord.ButtonStyle.secondary),
     ("Восстановление вещей", "restore", "📦", discord.ButtonStyle.success),
     ("Технические проблемы", "tech", "🔧", discord.ButtonStyle.secondary),
     ("Жалоба на игрока/группировку", "player_report", "⚠️", discord.ButtonStyle.danger),
